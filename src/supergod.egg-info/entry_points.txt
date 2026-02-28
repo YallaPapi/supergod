@@ -1,0 +1,4 @@
+[console_scripts]
+supergod = supergod.client.cli:main
+supergod-orchestrator = supergod.orchestrator.server:main
+supergod-worker = supergod.worker.daemon:main
