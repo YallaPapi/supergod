@@ -1,0 +1,11 @@
+[Unit]
+Description=Supergod Git Auto Sync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=REPO_DIR=/opt/supergod
+Environment=BRANCH=main
+ExecStart=/usr/local/bin/supergod-sync.sh
+

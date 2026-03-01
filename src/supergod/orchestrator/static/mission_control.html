@@ -1,0 +1,485 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Supergod Mission Control</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-0: #0a1220;
+      --bg-1: #111d34;
+      --bg-2: #1a2c4a;
+      --fg: #eef5ff;
+      --muted: #a9bdd8;
+      --line: #2d4771;
+      --ok: #24d18a;
+      --warn: #ffbc42;
+      --bad: #ff5d73;
+      --busy: #5fa8ff;
+      --panel: rgba(14, 26, 45, 0.86);
+      --shadow: 0 14px 42px rgba(3, 11, 23, 0.45);
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      color: var(--fg);
+      font-family: "Space Grotesk", sans-serif;
+      background:
+        radial-gradient(1000px 600px at 15% -10%, #2c4c7d66, transparent 60%),
+        radial-gradient(1000px 700px at 100% 10%, #2a7f8f38, transparent 64%),
+        linear-gradient(160deg, var(--bg-0), var(--bg-1) 40%, var(--bg-2));
+      overflow-x: hidden;
+    }
+
+    .scanline::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background: repeating-linear-gradient(
+        to bottom,
+        rgba(255, 255, 255, 0.02),
+        rgba(255, 255, 255, 0.02) 1px,
+        transparent 1px,
+        transparent 3px
+      );
+      opacity: 0.25;
+    }
+
+    .wrap {
+      max-width: 1500px;
+      margin: 0 auto;
+      padding: 24px;
+      display: grid;
+      gap: 16px;
+    }
+
+    .topbar {
+      display: flex;
+      gap: 14px;
+      align-items: center;
+      justify-content: space-between;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 14px 18px;
+      box-shadow: var(--shadow);
+    }
+
+    .title {
+      letter-spacing: 0.02em;
+      font-size: 1.1rem;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    .meta {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .pill {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 6px 10px;
+      font-size: 0.78rem;
+      color: var(--muted);
+      background: rgba(20, 34, 56, 0.66);
+      font-family: "JetBrains Mono", monospace;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1.15fr 1.15fr 1.4fr;
+      gap: 16px;
+      min-height: 65vh;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      min-height: 320px;
+    }
+
+    .panel h2 {
+      margin: 0;
+      padding: 13px 14px;
+      font-size: 0.9rem;
+      border-bottom: 1px solid var(--line);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #c7d8ef;
+    }
+
+    .panel-body {
+      padding: 12px;
+      overflow: auto;
+      display: grid;
+      gap: 10px;
+      align-content: start;
+    }
+
+    .workers {
+      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    }
+
+    .worker-card {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 10px;
+      background: rgba(15, 29, 50, 0.92);
+      animation: reveal 220ms ease-out;
+    }
+
+    .worker-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .worker-name {
+      font-family: "JetBrains Mono", monospace;
+      font-size: 0.8rem;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      box-shadow: 0 0 0 0 rgba(255,255,255,0.45);
+      animation: pulse 1.8s infinite;
+    }
+
+    .dot.idle { background: var(--ok); }
+    .dot.busy { background: var(--busy); }
+    .dot.offline { background: var(--bad); animation: none; }
+
+    .small {
+      color: var(--muted);
+      font-size: 0.76rem;
+      margin-top: 7px;
+      line-height: 1.35;
+    }
+
+    .task {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 10px;
+      background: rgba(15, 29, 50, 0.92);
+      animation: reveal 220ms ease-out;
+    }
+
+    .task-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      font-size: 0.8rem;
+      align-items: baseline;
+    }
+
+    .task-id {
+      font-family: "JetBrains Mono", monospace;
+    }
+
+    .status {
+      text-transform: uppercase;
+      font-size: 0.68rem;
+      letter-spacing: 0.07em;
+      padding: 3px 7px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+    }
+
+    .status.running, .status.assigned { color: #9ec5ff; border-color: #355a87; }
+    .status.completed { color: #9effd4; border-color: #2a6a54; }
+    .status.failed, .status.cancelled, .status.blocked { color: #ffc0cb; border-color: #784857; }
+    .status.decomposing, .status.pending, .status.paused { color: #ffe6a8; border-color: #6d5933; }
+
+    .bar {
+      margin-top: 8px;
+      height: 8px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      overflow: hidden;
+      background: rgba(26, 42, 68, 0.84);
+    }
+
+    .bar > i {
+      display: block;
+      height: 100%;
+      background: linear-gradient(90deg, #3e9bff, #4cf0d2);
+      transition: width 220ms ease;
+    }
+
+    .event {
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      padding: 8px 9px;
+      background: rgba(17, 33, 55, 0.9);
+      display: grid;
+      gap: 4px;
+      font-size: 0.78rem;
+    }
+
+    .event-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      color: #d9e8fb;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 0.72rem;
+    }
+
+    .muted { color: var(--muted); }
+
+    .footer-note {
+      color: var(--muted);
+      font-size: 0.8rem;
+      text-align: right;
+      padding: 0 4px;
+    }
+
+    @keyframes pulse {
+      0% { box-shadow: 0 0 0 0 rgba(153, 214, 255, 0.52); }
+      70% { box-shadow: 0 0 0 9px rgba(153, 214, 255, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(153, 214, 255, 0); }
+    }
+
+    @keyframes reveal {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    @media (max-width: 1180px) {
+      .grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body class="scanline">
+  <main class="wrap">
+    <section class="topbar">
+      <div class="title">Supergod Mission Control</div>
+      <div class="meta">
+        <span class="pill" id="orch-pill">orchestrator: connecting...</span>
+        <span class="pill" id="worker-pill">workers: 0</span>
+        <span class="pill" id="task-pill">tasks: 0</span>
+        <span class="pill" id="refresh-pill">refresh: --</span>
+      </div>
+    </section>
+
+    <section class="grid">
+      <article class="panel">
+        <h2>Workers / Heartbeat</h2>
+        <div id="workers" class="panel-body workers"></div>
+      </article>
+
+      <article class="panel">
+        <h2>Tasks / Progress Lanes</h2>
+        <div id="tasks" class="panel-body"></div>
+      </article>
+
+      <article class="panel">
+        <h2>Task Event Stream</h2>
+        <div id="events" class="panel-body"></div>
+      </article>
+    </section>
+
+    <div class="footer-note">
+      Tip: open this on your laptop at <span class="muted">http(s)://&lt;orchestrator&gt;:8080/mission</span>
+    </div>
+  </main>
+
+  <script>
+    const state = {
+      snapshot: { tasks: [], workers: [] },
+      events: [],
+      token: new URLSearchParams(location.search).get("token") || "",
+      lastRefresh: null,
+    };
+
+    function esc(str) {
+      return String(str || "").replace(/[&<>"']/g, (ch) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+      }[ch]));
+    }
+
+    function statusClass(status) {
+      const s = String(status || "").replace(/^TaskStatus\./, "").toLowerCase();
+      return s || "pending";
+    }
+
+    function toSecondsAgo(ts) {
+      if (!ts) return "--";
+      const d = new Date(ts).getTime();
+      if (!Number.isFinite(d)) return "--";
+      return Math.max(0, Math.floor((Date.now() - d) / 1000));
+    }
+
+    function pct(task) {
+      const total = Number(task.subtasks || 0);
+      const done = Number(task.completed_subtasks || 0);
+      if (!total) return 0;
+      return Math.max(0, Math.min(100, Math.round((done / total) * 100)));
+    }
+
+    function apiUrl(path) {
+      if (!state.token) return path;
+      const sep = path.includes("?") ? "&" : "?";
+      return path + sep + "token=" + encodeURIComponent(state.token);
+    }
+
+    function renderWorkers() {
+      const root = document.getElementById("workers");
+      const workers = [...(state.snapshot.workers || [])].sort((a, b) =>
+        String(a.name || "").localeCompare(String(b.name || ""))
+      );
+      if (!workers.length) {
+        root.innerHTML = `<div class="small muted">No workers connected.</div>`;
+        return;
+      }
+
+      root.innerHTML = workers.map((w) => {
+        const status = String(w.status || "offline").replace(/^WorkerStatus\./, "").toLowerCase();
+        const age = toSecondsAgo(w.last_seen);
+        return `
+          <div class="worker-card">
+            <div class="worker-top">
+              <div class="worker-name">${esc(w.name)}</div>
+              <div class="dot ${esc(status)}"></div>
+            </div>
+            <div class="small">status: <b>${esc(status)}</b></div>
+            <div class="small">heartbeat: ${age}s ago</div>
+            <div class="small">subtask: ${esc(w.current_subtask || "-")}</div>
+          </div>
+        `;
+      }).join("");
+    }
+
+    function renderTasks() {
+      const root = document.getElementById("tasks");
+      const tasks = [...(state.snapshot.tasks || [])];
+      if (!tasks.length) {
+        root.innerHTML = `<div class="small muted">No tasks yet.</div>`;
+        return;
+      }
+
+      tasks.sort((a, b) => {
+        const sa = statusClass(a.status);
+        const sb = statusClass(b.status);
+        if (sa === "running" && sb !== "running") return -1;
+        if (sb === "running" && sa !== "running") return 1;
+        return String(a.task_id || "").localeCompare(String(b.task_id || ""));
+      });
+
+      root.innerHTML = tasks.map((t) => {
+        const p = pct(t);
+        const status = statusClass(t.status);
+        return `
+          <div class="task">
+            <div class="task-row">
+              <span class="task-id">${esc(t.task_id)}</span>
+              <span class="status ${esc(status)}">${esc(status)}</span>
+            </div>
+            <div class="small muted">priority: ${esc(t.priority ?? 100)} | ${esc(t.completed_subtasks || 0)}/${esc(t.subtasks || 0)} done</div>
+            <div class="small">${esc((t.prompt || "").slice(0, 180))}</div>
+            <div class="bar"><i style="width:${p}%"></i></div>
+          </div>
+        `;
+      }).join("");
+    }
+
+    function renderEvents() {
+      const root = document.getElementById("events");
+      const events = state.events || [];
+      if (!events.length) {
+        root.innerHTML = `<div class="small muted">No task events captured yet.</div>`;
+        return;
+      }
+      root.innerHTML = events.slice(0, 80).map((e) => {
+        const payload = e.payload || {};
+        const summary = esc(JSON.stringify(payload).slice(0, 220));
+        return `
+          <div class="event">
+            <div class="event-top">
+              <span>${esc(e.task_id || "-")} :: ${esc(e.event_type || "-")}</span>
+              <span>${esc(e.created_at || "-")}</span>
+            </div>
+            <div class="muted">${summary}</div>
+          </div>
+        `;
+      }).join("");
+    }
+
+    function renderHeader() {
+      const workers = state.snapshot.workers || [];
+      const tasks = state.snapshot.tasks || [];
+      const online = workers.filter((w) => String(w.status).includes("idle") || String(w.status).includes("busy")).length;
+      const running = tasks.filter((t) => /running|assigned|decomposing/i.test(String(t.status))).length;
+      document.getElementById("orch-pill").textContent = "orchestrator: online";
+      document.getElementById("worker-pill").textContent = `workers: ${online}/${workers.length}`;
+      document.getElementById("task-pill").textContent = `tasks: ${tasks.length} (${running} active)`;
+      const now = new Date();
+      document.getElementById("refresh-pill").textContent = "refresh: " + now.toLocaleTimeString();
+    }
+
+    async function fetchSnapshot() {
+      const res = await fetch(apiUrl("/snapshot"), { cache: "no-store" });
+      if (!res.ok) throw new Error("snapshot http " + res.status);
+      state.snapshot = await res.json();
+      state.lastRefresh = Date.now();
+    }
+
+    async function fetchEvents() {
+      const candidates = (state.snapshot.tasks || [])
+        .filter((t) => /running|assigned|decomposing|failed|completed/i.test(String(t.status)))
+        .slice(0, 6)
+        .map((t) => t.task_id)
+        .filter(Boolean);
+      const uniq = Array.from(new Set(candidates));
+      const all = [];
+      for (const taskId of uniq) {
+        try {
+          const r = await fetch(apiUrl(`/task/${encodeURIComponent(taskId)}/events?limit=40`), { cache: "no-store" });
+          if (!r.ok) continue;
+          const data = await r.json();
+          for (const ev of (data.events || [])) all.push(ev);
+        } catch (_) {}
+      }
+      all.sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
+      state.events = all;
+    }
+
+    async function tick() {
+      try {
+        await fetchSnapshot();
+        await fetchEvents();
+      } catch (err) {
+        document.getElementById("orch-pill").textContent = "orchestrator: error";
+      }
+      renderHeader();
+      renderWorkers();
+      renderTasks();
+      renderEvents();
+    }
+
+    tick();
+    setInterval(tick, 2500);
+  </script>
+</body>
+</html>

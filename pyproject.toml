@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "supergod"
+version = "0.1.0"
+description = "Multi-agent orchestration for Codex CLI instances"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "websockets>=13.0",
+    "click>=8.1.0",
+    "aiosqlite>=0.20.0",
+    "pydantic>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24.0",
+]
+
+[project.scripts]
+supergod = "supergod.client.cli:main"
+supergod-orchestrator = "supergod.orchestrator.server:main"
+supergod-worker = "supergod.worker.daemon:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
