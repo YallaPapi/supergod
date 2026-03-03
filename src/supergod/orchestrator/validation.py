@@ -18,6 +18,14 @@ async def _run(cmd: list[str], cwd: str) -> tuple[int, str, str]:
     )
 
 
+def _parse_ls_remote_head(output: str) -> str | None:
+    for line in output.splitlines():
+        parts = line.split()
+        if parts:
+            return parts[0]
+    return None
+
+
 async def validate_completed_subtask(
     workdir: str,
     branch: str,
@@ -32,10 +40,15 @@ async def validate_completed_subtask(
         return True, ""
 
     # Ensure branch exists on remote.
-    rc, out, _ = await _run(
+    rc, out, err = await _run(
         ["git", "ls-remote", "--heads", "origin", branch], workdir
     )
     if rc != 0 or not out:
+        if err:
+            return (
+                False,
+                f"Validation failed: remote branch lookup failed ({branch}): {err}",
+            )
         return False, f"Validation failed: remote branch not found ({branch})"
 
     # Ensure branch head differs from main head (non-empty contribution).
@@ -45,8 +58,10 @@ async def validate_completed_subtask(
     if rc_main != 0 or not out_main:
         return True, ""
 
-    main_head = out_main.split()[0]
-    branch_head = out.split()[0]
+    main_head = _parse_ls_remote_head(out_main)
+    branch_head = _parse_ls_remote_head(out)
+    if not main_head or not branch_head:
+        return False, "Validation failed: malformed git ls-remote output"
     if branch_head == main_head:
         return False, "Validation failed: branch head equals main (no effective changes)"
 
