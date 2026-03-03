@@ -24,6 +24,50 @@ class Subtask:
     depends_on: list[str]
 
 
+def validate_subtask_dependencies(subtasks: list[Subtask]) -> tuple[bool, str]:
+    """Validate dependency graph: all references exist and no cycles."""
+    by_id = {s.id: s for s in subtasks}
+
+    for s in subtasks:
+        for dep in s.depends_on:
+            if dep not in by_id:
+                return (
+                    False,
+                    f"Subtask '{s.id}' depends on unknown subtask '{dep}'",
+                )
+
+    visiting: set[str] = set()
+    visited: set[str] = set()
+    stack: list[str] = []
+
+    def dfs(subtask_id: str) -> tuple[bool, str]:
+        if subtask_id in visiting:
+            cycle_start = stack.index(subtask_id)
+            cycle = stack[cycle_start:] + [subtask_id]
+            return False, "Circular dependency detected: " + " -> ".join(cycle)
+        if subtask_id in visited:
+            return True, ""
+
+        visiting.add(subtask_id)
+        stack.append(subtask_id)
+        for dep_id in by_id[subtask_id].depends_on:
+            ok, err = dfs(dep_id)
+            if not ok:
+                return False, err
+
+        stack.pop()
+        visiting.remove(subtask_id)
+        visited.add(subtask_id)
+        return True, ""
+
+    for subtask_id in by_id:
+        ok, err = dfs(subtask_id)
+        if not ok:
+            return False, err
+
+    return True, ""
+
+
 def _extract_json_array(text: str) -> list:
     """Extract a JSON array from text that may contain markdown or other noise.
 
@@ -183,6 +227,11 @@ async def decompose_task(
 
     if not subtasks:
         log.warning("Decomposition produced 0 valid subtasks from %d items. Falling back.", len(items))
+        return [Subtask(id=new_id(), description=prompt, depends_on=[])]
+
+    ok, err = validate_subtask_dependencies(subtasks)
+    if not ok:
+        log.warning("Invalid decomposition dependency graph (%s). Falling back.", err)
         return [Subtask(id=new_id(), description=prompt, depends_on=[])]
 
     log.info("Decomposed into %d subtasks", len(subtasks))

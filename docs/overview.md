@@ -153,6 +153,7 @@ The servers don't need to be powerful. The AI processing happens on OpenAI's inf
 - 3 workers on 1 server, proven with real coding tasks
 - CLI client with live progress streaming
 - WebSocket protocol for all communication
+- Fail-fast dependency-graph validation (unknown deps + circular dependency detection) before subtask execution
 
 **Next steps:**
 - Scale to 5 servers with shared git repository
@@ -182,4 +183,3 @@ For context: this gives you 15 parallel AI agents that can build software, condu
 - **Skill library:** [docs/skills_library.md](skills_library.md) - Homogeneous workers with capability-pack prompt injection and curated skill imports
 - **Mission control dashboard:** [docs/mission_control_dashboard.md](mission_control_dashboard.md) - Browser UI for worker heartbeat, task lanes, and event timeline
 - **Ops hardening:** [docs/ops_hardening.md](ops_hardening.md) - Quoting-safe cluster operations, Git auto-sync, and anti-drift policy
-
