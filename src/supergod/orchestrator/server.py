@@ -868,6 +868,9 @@ async def _process_task(task_id: str, prompt: str):
         if task and task["status"] == TaskStatus.CANCELLED:
             log.info("Task %s cancelled during decomposition", task_id)
             return
+        dep_error = _validate_subtask_graph(subtasks)
+        if dep_error:
+            raise ValueError(f"Invalid subtask dependency graph: {dep_error}")
 
         # Create subtasks in DB
         for st in subtasks:
@@ -936,6 +939,57 @@ async def _process_task(task_id: str, prompt: str):
         await _broadcast_to_clients(
             serialize(TaskFailedMsg(task_id=task_id, error=str(e)))
         )
+
+
+def _validate_subtask_graph(subtasks: list) -> str | None:
+    """Validate decomposition dependencies are resolvable and acyclic."""
+    ids = [str(getattr(st, "id", "")) for st in subtasks]
+    id_set = set(ids)
+
+    for st in subtasks:
+        sid = str(getattr(st, "id", ""))
+        deps = list(getattr(st, "depends_on", []) or [])
+        for dep in deps:
+            dep_id = str(dep)
+            if dep_id == sid:
+                return f"subtask '{sid}' cannot depend on itself"
+            if dep_id not in id_set:
+                return f"subtask '{sid}' depends on unknown id '{dep_id}'"
+
+    graph = {
+        str(getattr(st, "id", "")): [str(d) for d in (getattr(st, "depends_on", []) or [])]
+        for st in subtasks
+    }
+    state: dict[str, int] = {}
+    stack: list[str] = []
+
+    def visit(node: str) -> str | None:
+        node_state = state.get(node, 0)
+        if node_state == 1:
+            if node in stack:
+                idx = stack.index(node)
+                cycle = stack[idx:] + [node]
+            else:
+                cycle = [node, node]
+            return " -> ".join(cycle)
+        if node_state == 2:
+            return None
+
+        state[node] = 1
+        stack.append(node)
+        for dep in graph.get(node, []):
+            cycle = visit(dep)
+            if cycle:
+                return cycle
+        stack.pop()
+        state[node] = 2
+        return None
+
+    for sid in graph:
+        cycle = visit(sid)
+        if cycle:
+            return f"circular dependency detected ({cycle})"
+    return None
 
 
 async def _check_task_progress(subtask_id: str):

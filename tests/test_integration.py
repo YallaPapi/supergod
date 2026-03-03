@@ -420,6 +420,49 @@ async def test_process_task_records_skill_injection_events(app_with_db):
     assert any(e["event_type"] == "skill_injection" for e in events)
 
 
+async def test_process_task_fails_on_circular_dependencies(app_with_db):
+    app, db, scheduler = app_with_db
+    import supergod.orchestrator.server as srv
+    from supergod.orchestrator.brain import Subtask
+
+    await db.create_task("t1", "Build auth system")
+    mock_subtasks = [
+        Subtask(id="1", description="Step 1", depends_on=["2"]),
+        Subtask(id="2", description="Step 2", depends_on=["1"]),
+    ]
+
+    with patch(
+        "supergod.orchestrator.server.decompose_task",
+        return_value=mock_subtasks,
+    ):
+        await srv._process_task("t1", "Build auth system")
+
+    task = await db.get_task("t1")
+    assert task["status"] == TaskStatus.FAILED
+    subtasks = await db.get_subtasks_for_task("t1")
+    assert subtasks == []
+
+
+async def test_process_task_fails_on_unknown_dependency(app_with_db):
+    app, db, scheduler = app_with_db
+    import supergod.orchestrator.server as srv
+    from supergod.orchestrator.brain import Subtask
+
+    await db.create_task("t1", "Build auth system")
+    mock_subtasks = [Subtask(id="1", description="Step 1", depends_on=["999"])]
+
+    with patch(
+        "supergod.orchestrator.server.decompose_task",
+        return_value=mock_subtasks,
+    ):
+        await srv._process_task("t1", "Build auth system")
+
+    task = await db.get_task("t1")
+    assert task["status"] == TaskStatus.FAILED
+    subtasks = await db.get_subtasks_for_task("t1")
+    assert subtasks == []
+
+
 # --- _extract_text helper ---
 
 
