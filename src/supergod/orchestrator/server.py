@@ -48,7 +48,7 @@ from supergod.shared.protocol import (
     new_id,
     serialize,
 )
-from supergod.orchestrator.brain import decompose_task
+from supergod.orchestrator.brain import decompose_task, validate_subtask_dependencies
 from supergod.orchestrator.git_manager import (
     merge_all_branches_with_report,
     run_tests,
@@ -864,6 +864,9 @@ async def _process_task(task_id: str, prompt: str):
 
         # Decompose using orchestrator's own Codex
         subtasks = await decompose_task(prompt, workdir)
+        deps_ok, deps_error = validate_subtask_dependencies(subtasks)
+        if not deps_ok:
+            raise ValueError(f"Invalid subtask dependency graph: {deps_error}")
         task = await db.get_task(task_id)
         if task and task["status"] == TaskStatus.CANCELLED:
             log.info("Task %s cancelled during decomposition", task_id)

@@ -24,6 +24,67 @@ class Subtask:
     depends_on: list[str]
 
 
+def validate_subtask_dependencies(subtasks: list[Subtask]) -> tuple[bool, str]:
+    """Validate dependency graph for duplicate IDs, missing deps, and cycles."""
+    if not subtasks:
+        return False, "no subtasks generated"
+
+    nodes: dict[str, Subtask] = {}
+    duplicates: set[str] = set()
+    for subtask in subtasks:
+        sid = str(subtask.id)
+        if sid in nodes:
+            duplicates.add(sid)
+            continue
+        nodes[sid] = subtask
+
+    if duplicates:
+        ordered = ", ".join(sorted(duplicates))
+        return False, f"duplicate subtask id(s): {ordered}"
+
+    missing: set[str] = set()
+    for subtask in subtasks:
+        for dep in subtask.depends_on:
+            if dep not in nodes:
+                missing.add(dep)
+    if missing:
+        ordered = ", ".join(sorted(missing))
+        return False, f"unknown dependency id(s): {ordered}"
+
+    # DFS cycle detection over dependency edges: subtask -> depends_on.
+    visiting: set[str] = set()
+    visited: set[str] = set()
+    stack: list[str] = []
+
+    def _visit(node_id: str) -> list[str] | None:
+        if node_id in visited:
+            return None
+        if node_id in visiting:
+            try:
+                start = stack.index(node_id)
+            except ValueError:
+                start = 0
+            return stack[start:] + [node_id]
+
+        visiting.add(node_id)
+        stack.append(node_id)
+        for dep in nodes[node_id].depends_on:
+            cycle = _visit(dep)
+            if cycle:
+                return cycle
+        stack.pop()
+        visiting.remove(node_id)
+        visited.add(node_id)
+        return None
+
+    for sid in nodes:
+        cycle = _visit(sid)
+        if cycle:
+            return False, f"circular dependency detected: {' -> '.join(cycle)}"
+
+    return True, ""
+
+
 def _extract_json_array(text: str) -> list:
     """Extract a JSON array from text that may contain markdown or other noise.
 
