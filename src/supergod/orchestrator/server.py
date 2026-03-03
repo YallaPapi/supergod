@@ -48,7 +48,7 @@ from supergod.shared.protocol import (
     new_id,
     serialize,
 )
-from supergod.orchestrator.brain import decompose_task
+from supergod.orchestrator.brain import Subtask, decompose_task
 from supergod.orchestrator.git_manager import (
     merge_all_branches_with_report,
     run_tests,
@@ -868,6 +868,9 @@ async def _process_task(task_id: str, prompt: str):
         if task and task["status"] == TaskStatus.CANCELLED:
             log.info("Task %s cancelled during decomposition", task_id)
             return
+        dep_error = _validate_subtask_dependencies(subtasks)
+        if dep_error:
+            raise ValueError(dep_error)
 
         # Create subtasks in DB
         for st in subtasks:
@@ -926,7 +929,11 @@ async def _process_task(task_id: str, prompt: str):
 
     except Exception as e:
         log.error("Task processing failed: %s", e, exc_info=True)
-        await db.update_task_status(task_id, TaskStatus.FAILED)
+        await db.update_task_status(
+            task_id,
+            TaskStatus.FAILED,
+            summary=f"Task processing failed: {str(e)[:200]}",
+        )
         _metric_inc("tasks_failed_total")
         await _save_checkpoint(
             task_id,
@@ -1357,6 +1364,61 @@ async def _dispatch_loop() -> None:
             raise
         except Exception as e:
             log.error("Dispatch loop error: %s", e, exc_info=True)
+
+
+def _validate_subtask_dependencies(subtasks: list[Subtask]) -> str | None:
+    """Validate decomposition dependency graph before persisting subtasks."""
+    if not subtasks:
+        return None
+
+    graph: dict[str, list[str]] = {}
+    duplicates: set[str] = set()
+    for st in subtasks:
+        if st.id in graph:
+            duplicates.add(st.id)
+        graph[st.id] = list(st.depends_on or [])
+    if duplicates:
+        dupes = ", ".join(sorted(duplicates))
+        return f"Duplicate subtask ids in decomposition: {dupes}"
+
+    missing = sorted(
+        {
+            dep
+            for deps in graph.values()
+            for dep in deps
+            if dep not in graph
+        }
+    )
+    if missing:
+        return "Invalid decomposition dependencies (unknown ids): " + ", ".join(missing)
+
+    visited: set[str] = set()
+    stack: list[str] = []
+    in_stack: set[str] = set()
+
+    def _dfs(node: str) -> list[str] | None:
+        visited.add(node)
+        stack.append(node)
+        in_stack.add(node)
+        for dep in graph[node]:
+            if dep not in visited:
+                cycle = _dfs(dep)
+                if cycle:
+                    return cycle
+            elif dep in in_stack:
+                i = stack.index(dep)
+                return stack[i:] + [dep]
+        stack.pop()
+        in_stack.remove(node)
+        return None
+
+    for node in graph:
+        if node in visited:
+            continue
+        cycle = _dfs(node)
+        if cycle:
+            return "Circular dependency detected: " + " -> ".join(cycle)
+    return None
 
 
 def _metric_inc(name: str, value: float = 1.0) -> None:
