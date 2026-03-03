@@ -24,6 +24,66 @@ class Subtask:
     depends_on: list[str]
 
 
+def validate_subtask_graph(subtasks: list[Subtask]) -> tuple[bool, str]:
+    """Validate decomposition dependencies are acyclic and internally consistent."""
+    ids = [str(st.id) for st in subtasks]
+    if not ids:
+        return False, "No subtasks produced"
+
+    seen: set[str] = set()
+    duplicates: list[str] = []
+    for sid in ids:
+        if sid in seen:
+            duplicates.append(sid)
+        seen.add(sid)
+    if duplicates:
+        uniq = ", ".join(sorted(set(duplicates)))
+        return False, f"Duplicate subtask IDs: {uniq}"
+
+    id_set = set(ids)
+    dep_map: dict[str, list[str]] = {}
+    for st in subtasks:
+        sid = str(st.id)
+        deps = [str(d) for d in (st.depends_on or [])]
+        missing = [d for d in deps if d not in id_set]
+        if missing:
+            return False, f"Subtask {sid} depends on unknown IDs: {', '.join(sorted(set(missing)))}"
+        dep_map[sid] = deps
+
+    # DFS cycle detection on dependency graph.
+    visiting: set[str] = set()
+    visited: set[str] = set()
+    stack: list[str] = []
+
+    def _visit(node: str) -> tuple[bool, str]:
+        if node in visited:
+            return True, ""
+        if node in visiting:
+            try:
+                idx = stack.index(node)
+                cycle = stack[idx:] + [node]
+            except ValueError:
+                cycle = [node, node]
+            return False, f"Circular dependency detected: {' -> '.join(cycle)}"
+
+        visiting.add(node)
+        stack.append(node)
+        for dep in dep_map.get(node, []):
+            ok, reason = _visit(dep)
+            if not ok:
+                return False, reason
+        stack.pop()
+        visiting.remove(node)
+        visited.add(node)
+        return True, ""
+
+    for sid in ids:
+        ok, reason = _visit(sid)
+        if not ok:
+            return False, reason
+    return True, ""
+
+
 def _extract_json_array(text: str) -> list:
     """Extract a JSON array from text that may contain markdown or other noise.
 
@@ -173,11 +233,14 @@ async def decompose_task(
         if not desc:
             log.warning("Skipping subtask with no description: %s", item)
             continue
+        raw_depends = item.get("depends_on", [])
+        if not isinstance(raw_depends, list):
+            raw_depends = []
         subtasks.append(
             Subtask(
-                id=item.get("id", new_id()),
+                id=str(item.get("id", new_id())),
                 description=desc,
-                depends_on=item.get("depends_on", []),
+                depends_on=[str(dep) for dep in raw_depends],
             )
         )
 
