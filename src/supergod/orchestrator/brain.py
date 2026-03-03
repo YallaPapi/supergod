@@ -24,6 +24,50 @@ class Subtask:
     depends_on: list[str]
 
 
+def _validate_dependency_graph(subtasks: list[Subtask]) -> str | None:
+    """Return validation error text for an invalid dependency graph."""
+    if not subtasks:
+        return "no_subtasks"
+
+    id_to_subtask: dict[str, Subtask] = {}
+    for st in subtasks:
+        if st.id in id_to_subtask:
+            return f"duplicate_subtask_id:{st.id}"
+        id_to_subtask[st.id] = st
+
+    ids = set(id_to_subtask.keys())
+    for st in subtasks:
+        for dep in st.depends_on:
+            if dep == st.id:
+                return f"self_dependency:{st.id}"
+            if dep not in ids:
+                return f"unknown_dependency:{dep}"
+
+    # Cycle detection over dependency edges: subtask -> dependencies
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def _dfs(node_id: str) -> bool:
+        if node_id in visited:
+            return False
+        if node_id in visiting:
+            return True
+        visiting.add(node_id)
+        node = id_to_subtask[node_id]
+        for dep in node.depends_on:
+            if _dfs(dep):
+                return True
+        visiting.remove(node_id)
+        visited.add(node_id)
+        return False
+
+    for st in subtasks:
+        if _dfs(st.id):
+            return "circular_dependencies"
+
+    return None
+
+
 def _extract_json_array(text: str) -> list:
     """Extract a JSON array from text that may contain markdown or other noise.
 
@@ -183,6 +227,14 @@ async def decompose_task(
 
     if not subtasks:
         log.warning("Decomposition produced 0 valid subtasks from %d items. Falling back.", len(items))
+        return [Subtask(id=new_id(), description=prompt, depends_on=[])]
+
+    graph_error = _validate_dependency_graph(subtasks)
+    if graph_error:
+        log.warning(
+            "Decomposition produced invalid dependency graph (%s). Falling back to single subtask.",
+            graph_error,
+        )
         return [Subtask(id=new_id(), description=prompt, depends_on=[])]
 
     log.info("Decomposed into %d subtasks", len(subtasks))
