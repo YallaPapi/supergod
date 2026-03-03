@@ -26,6 +26,7 @@ If `SUPERGOD_AUTH_TOKEN` is set, include:
 - Event timeline:
   - events pulled from `/task/{task_id}/events`
   - sorted latest-first
+  - includes remediation events (for example `dependency_repair` when an invalid subtask DAG is auto-repaired)
 
 ## Data Sources
 

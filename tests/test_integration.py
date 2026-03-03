@@ -420,6 +420,51 @@ async def test_process_task_records_skill_injection_events(app_with_db):
     assert any(e["event_type"] == "skill_injection" for e in events)
 
 
+def test_dependency_graph_issue_detects_cycle():
+    import supergod.orchestrator.server as srv
+    from supergod.orchestrator.brain import Subtask
+
+    subtasks = [
+        Subtask(id="1", description="Step 1", depends_on=["2"]),
+        Subtask(id="2", description="Step 2", depends_on=["1"]),
+    ]
+    issue = srv._dependency_graph_issue(subtasks)
+    assert issue is not None
+    assert issue.startswith("circular dependencies:")
+
+
+async def test_process_task_repairs_invalid_dependency_graph(app_with_db):
+    app, db, scheduler = app_with_db
+    import supergod.orchestrator.server as srv
+    from supergod.orchestrator.brain import Subtask
+
+    await db.create_task("t1", "Build auth system")
+    cyclic_subtasks = [
+        Subtask(id="1", description="Step 1", depends_on=["2"]),
+        Subtask(id="2", description="Step 2", depends_on=["1"]),
+    ]
+
+    with patch(
+        "supergod.orchestrator.server.decompose_task",
+        return_value=cyclic_subtasks,
+    ):
+        await srv._process_task("t1", "Build auth system")
+
+    await asyncio.sleep(0.1)
+
+    task = await db.get_task("t1")
+    assert task["status"] == TaskStatus.ASSIGNED
+
+    subtasks = await db.get_subtasks_for_task("t1")
+    assert len(subtasks) == 1
+    assert subtasks[0]["subtask_id"].startswith("t1-")
+    assert json.loads(subtasks[0]["depends_on"]) == []
+
+    events = await db.get_task_events("t1", limit=100)
+    repair_events = [e for e in events if e["event_type"] == "dependency_repair"]
+    assert len(repair_events) == 1
+
+
 # --- _extract_text helper ---
 
 

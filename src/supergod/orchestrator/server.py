@@ -48,7 +48,7 @@ from supergod.shared.protocol import (
     new_id,
     serialize,
 )
-from supergod.orchestrator.brain import decompose_task
+from supergod.orchestrator.brain import Subtask, decompose_task
 from supergod.orchestrator.git_manager import (
     merge_all_branches_with_report,
     run_tests,
@@ -717,6 +717,67 @@ def _build_brief_prompt(session: dict) -> str:
     )
 
 
+def _dependency_graph_issue(subtasks: list[Subtask]) -> str | None:
+    ids = [str(s.id) for s in subtasks]
+    if len(set(ids)) != len(ids):
+        return "duplicate subtask ids"
+
+    id_set = set(ids)
+    graph: dict[str, list[str]] = {}
+    for st in subtasks:
+        sid = str(st.id)
+        deps_raw = st.depends_on if isinstance(st.depends_on, list) else []
+        deps = [str(d) for d in deps_raw]
+        if sid in deps:
+            return f"self dependency on {sid}"
+        unknown = sorted(d for d in deps if d not in id_set)
+        if unknown:
+            return f"unknown dependency {sid}->{unknown[0]}"
+        graph[sid] = deps
+
+    visit_state: dict[str, int] = {}
+    stack: list[str] = []
+
+    def _dfs(node: str) -> list[str] | None:
+        visit_state[node] = 1
+        stack.append(node)
+        for dep in graph.get(node, []):
+            state = visit_state.get(dep, 0)
+            if state == 0:
+                found = _dfs(dep)
+                if found:
+                    return found
+            elif state == 1:
+                start = stack.index(dep)
+                return stack[start:] + [dep]
+        stack.pop()
+        visit_state[node] = 2
+        return None
+
+    for node in sorted(graph):
+        if visit_state.get(node, 0) != 0:
+            continue
+        cycle = _dfs(node)
+        if cycle:
+            return "circular dependencies: " + " -> ".join(cycle)
+    return None
+
+
+async def _repair_invalid_dependency_graph(
+    task_id: str, prompt: str, subtasks: list[Subtask]
+) -> list[Subtask]:
+    issue = _dependency_graph_issue(subtasks)
+    if not issue:
+        return subtasks
+    log.warning("Invalid dependency graph for task %s: %s", task_id, issue)
+    await db.add_task_event(
+        task_id,
+        "dependency_repair",
+        {"issue": issue, "action": "fallback_single_subtask"},
+    )
+    return [Subtask(id=new_id(), description=prompt, depends_on=[])]
+
+
 # --- Worker WebSocket ---
 
 
@@ -868,6 +929,8 @@ async def _process_task(task_id: str, prompt: str):
         if task and task["status"] == TaskStatus.CANCELLED:
             log.info("Task %s cancelled during decomposition", task_id)
             return
+
+        subtasks = await _repair_invalid_dependency_graph(task_id, prompt, subtasks)
 
         # Create subtasks in DB
         for st in subtasks:
