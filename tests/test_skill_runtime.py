@@ -74,6 +74,38 @@ def test_pack_override_is_respected(tmp_path, monkeypatch):
     assert meta["selected_packs"] == ["infra-ops"]
 
 
+def test_active_capability_packs_override_is_respected(tmp_path, monkeypatch):
+    index_path = tmp_path / "index.json"
+    index_path.write_text(
+        json.dumps(
+            {
+                "stats": {"total_skills": 1},
+                "skills": [
+                    {
+                        "id": "dependency-resolver",
+                        "pack": "core-dev",
+                        "description": "Dependency analysis.",
+                        "rules": [],
+                        "tags": ["dependency"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runtime, "INDEX_PATH", index_path)
+    monkeypatch.setattr(runtime, "SKILLS_ENABLED", True)
+
+    prompt, meta = runtime.build_worker_subtask_prompt(
+        task_prompt="Parallel execution context",
+        subtask_prompt="Active capability packs: core-dev, project-i2v",
+        repo_root="/workspace/repo",
+    )
+
+    assert "Active capability packs: core-dev, project-i2v" in prompt
+    assert meta["selected_packs"] == ["core-dev", "project-i2v"]
+
+
 def test_skills_disabled_returns_original_prompt(monkeypatch):
     monkeypatch.setattr(runtime, "SKILLS_ENABLED", False)
     subtask = "Implement health check endpoint"

@@ -45,6 +45,12 @@ packs: infra-ops,review-qa
 
 This bypasses auto-selection and uses only the listed packs.
 
+Also supported (useful in replan/fan-out subtasks that already include pack context):
+
+```text
+Active capability packs: core-dev, project-i2v
+```
+
 ## Runtime Configuration
 
 - `SUPERGOD_SKILLS_ENABLED` (default: `true`)

@@ -18,6 +18,9 @@ from supergod.skills.catalog import BASE_PACKS, INDEX_PATH, PACK_DEFINITIONS
 
 
 _PACK_OVERRIDE_RE = re.compile(r"(?im)^\s*packs?\s*:\s*([a-z0-9_,\- ]+)\s*$")
+_ACTIVE_PACKS_RE = re.compile(
+    r"(?im)^\s*active\s+capability\s+packs?\s*:\s*([a-z0-9_,\- ]+)\s*$"
+)
 
 
 def _load_index(index_path: Path | None = None) -> dict[str, Any]:
@@ -48,7 +51,9 @@ def _normalize_text(text: str) -> str:
 def _parse_pack_overrides(task_prompt: str, subtask_prompt: str) -> list[str]:
     found: list[str] = []
     for candidate in (task_prompt, subtask_prompt):
-        for match in _PACK_OVERRIDE_RE.findall(candidate or ""):
+        text = candidate or ""
+        matches = [*_PACK_OVERRIDE_RE.findall(text), *_ACTIVE_PACKS_RE.findall(text)]
+        for match in matches:
             for raw in match.split(","):
                 name = raw.strip().lower()
                 if name and name in PACK_DEFINITIONS and name not in found:
