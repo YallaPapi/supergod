@@ -9,7 +9,25 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import websockets
 
-from mcp.server.fastmcp import FastMCP
+try:
+    from mcp.server.fastmcp import FastMCP
+except ModuleNotFoundError:  # pragma: no cover - exercised via runtime fallback behavior
+    class FastMCP:  # type: ignore[override]
+        """Fallback shim so the module can be imported without MCP installed."""
+
+        def __init__(self, _name: str):
+            pass
+
+        def tool(self):
+            def _decorator(func):
+                return func
+
+            return _decorator
+
+        def run(self, transport: str = "stdio"):
+            raise RuntimeError(
+                "MCP dependency missing. Install with: pip install mcp"
+            )
 
 # Logging to stderr only — stdout is reserved for MCP protocol
 logging.basicConfig(level=logging.INFO, stream=sys.stderr)

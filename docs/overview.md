@@ -84,6 +84,11 @@ Server 1  Server 2  Server 3  Server 4  Server 5
 - Shows live progress as workers code
 - Also supports `supergod status`, `supergod watch`, `supergod cancel`
 
+**MCP Server (optional, stdio transport)**
+- Exposes `supergod_run` and `supergod_status` as MCP tools for MCP-compatible clients
+- Module: `src/supergod/mcp_server.py`
+- Requires extra dependency: `pip install mcp`
+
 ### Every Server Is Identical
 
 All 5 servers have the same setup — same software, same AI tools, same capabilities. Any worker can handle any task. This means:
@@ -182,4 +187,3 @@ For context: this gives you 15 parallel AI agents that can build software, condu
 - **Skill library:** [docs/skills_library.md](skills_library.md) - Homogeneous workers with capability-pack prompt injection and curated skill imports
 - **Mission control dashboard:** [docs/mission_control_dashboard.md](mission_control_dashboard.md) - Browser UI for worker heartbeat, task lanes, and event timeline
 - **Ops hardening:** [docs/ops_hardening.md](ops_hardening.md) - Quoting-safe cluster operations, Git auto-sync, and anti-drift policy
-
