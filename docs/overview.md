@@ -60,6 +60,7 @@ Server 1  Server 2  Server 3  Server 4  Server 5
 **Orchestrator (1 instance, on Server 1)**
 - Receives tasks from your laptop over a WebSocket connection
 - Uses its own AI instance to decompose tasks into subtasks
+- Validates subtask dependency graphs (unknown/self/circular dependencies) and falls back to a single executable subtask if invalid
 - Assigns subtasks to available workers
 - Manages a shared code repository (git) that all workers push to
 - Merges all branches when work is done
@@ -182,4 +183,3 @@ For context: this gives you 15 parallel AI agents that can build software, condu
 - **Skill library:** [docs/skills_library.md](skills_library.md) - Homogeneous workers with capability-pack prompt injection and curated skill imports
 - **Mission control dashboard:** [docs/mission_control_dashboard.md](mission_control_dashboard.md) - Browser UI for worker heartbeat, task lanes, and event timeline
 - **Ops hardening:** [docs/ops_hardening.md](ops_hardening.md) - Quoting-safe cluster operations, Git auto-sync, and anti-drift policy
-

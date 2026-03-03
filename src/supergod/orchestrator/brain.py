@@ -24,6 +24,47 @@ class Subtask:
     depends_on: list[str]
 
 
+def _validate_subtask_dependency_graph(
+    subtasks: list[Subtask],
+) -> str | None:
+    """Validate dependency graph; return error string if invalid."""
+    ids = [s.id for s in subtasks]
+    unique_ids = set(ids)
+    if len(ids) != len(unique_ids):
+        return "duplicate_subtask_ids"
+
+    for s in subtasks:
+        if s.id in s.depends_on:
+            return f"self_dependency:{s.id}"
+        for dep in s.depends_on:
+            if dep not in unique_ids:
+                return f"unknown_dependency:{s.id}->{dep}"
+
+    # DFS cycle detection over dependency edges (subtask -> dependency).
+    visiting: set[str] = set()
+    visited: set[str] = set()
+    graph = {s.id: s.depends_on for s in subtasks}
+
+    def _dfs(node: str) -> bool:
+        if node in visiting:
+            return True
+        if node in visited:
+            return False
+        visiting.add(node)
+        for dep in graph.get(node, []):
+            if _dfs(dep):
+                return True
+        visiting.remove(node)
+        visited.add(node)
+        return False
+
+    for node in graph:
+        if _dfs(node):
+            return "circular_dependency"
+
+    return None
+
+
 def _extract_json_array(text: str) -> list:
     """Extract a JSON array from text that may contain markdown or other noise.
 
@@ -183,6 +224,14 @@ async def decompose_task(
 
     if not subtasks:
         log.warning("Decomposition produced 0 valid subtasks from %d items. Falling back.", len(items))
+        return [Subtask(id=new_id(), description=prompt, depends_on=[])]
+
+    graph_error = _validate_subtask_dependency_graph(subtasks)
+    if graph_error:
+        log.warning(
+            "Decomposition produced invalid dependency graph (%s). Falling back to single subtask.",
+            graph_error,
+        )
         return [Subtask(id=new_id(), description=prompt, depends_on=[])]
 
     log.info("Decomposed into %d subtasks", len(subtasks))
