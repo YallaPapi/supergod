@@ -853,6 +853,57 @@ async def worker_ws(ws: WebSocket):
 # --- Task Processing Pipeline ---
 
 
+def _validate_subtask_dependency_graph(subtasks: list) -> None:
+    """Reject invalid decomposition plans before persisting subtasks."""
+    subtask_ids = [st.id for st in subtasks]
+    unique_ids = set(subtask_ids)
+
+    if len(unique_ids) != len(subtask_ids):
+        counts: dict[str, int] = {}
+        for sid in subtask_ids:
+            counts[sid] = counts.get(sid, 0) + 1
+        dupes = sorted([sid for sid, count in counts.items() if count > 1])
+        raise ValueError(f"Decomposition contains duplicate subtask ids: {dupes}")
+
+    indegree: dict[str, int] = {sid: 0 for sid in unique_ids}
+    outgoing: dict[str, set[str]] = {sid: set() for sid in unique_ids}
+
+    for st in subtasks:
+        deps = st.depends_on or []
+        if not isinstance(deps, list):
+            raise ValueError(
+                f"Subtask {st.id} has invalid depends_on type: {type(deps).__name__}"
+            )
+
+        for dep in deps:
+            if dep == st.id:
+                raise ValueError(f"Subtask {st.id} cannot depend on itself")
+            if dep not in unique_ids:
+                raise ValueError(
+                    f"Subtask {st.id} depends on unknown subtask id: {dep}"
+                )
+            if st.id not in outgoing[dep]:
+                outgoing[dep].add(st.id)
+                indegree[st.id] += 1
+
+    ready = [sid for sid, degree in indegree.items() if degree == 0]
+    visited = 0
+    while ready:
+        current = ready.pop()
+        visited += 1
+        for nxt in outgoing[current]:
+            indegree[nxt] -= 1
+            if indegree[nxt] == 0:
+                ready.append(nxt)
+
+    if visited != len(unique_ids):
+        cycle_nodes = sorted([sid for sid, degree in indegree.items() if degree > 0])
+        raise ValueError(
+            "Decomposition contains circular dependencies involving: "
+            + ", ".join(cycle_nodes)
+        )
+
+
 async def _process_task(task_id: str, prompt: str):
     """Full task lifecycle: decompose -> assign -> merge -> test."""
     try:
@@ -868,6 +919,7 @@ async def _process_task(task_id: str, prompt: str):
         if task and task["status"] == TaskStatus.CANCELLED:
             log.info("Task %s cancelled during decomposition", task_id)
             return
+        _validate_subtask_dependency_graph(subtasks)
 
         # Create subtasks in DB
         for st in subtasks:
