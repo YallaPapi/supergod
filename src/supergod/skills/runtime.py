@@ -56,13 +56,45 @@ def _parse_pack_overrides(task_prompt: str, subtask_prompt: str) -> list[str]:
     return found
 
 
+def _resolve_pack_dependencies(selected_packs: list[str]) -> list[str]:
+    resolved: list[str] = []
+    visited: set[str] = set()
+    visiting: list[str] = []
+
+    def visit(pack_name: str) -> None:
+        if pack_name in visited:
+            return
+        if pack_name in visiting:
+            cycle_start = visiting.index(pack_name)
+            cycle = visiting[cycle_start:] + [pack_name]
+            raise ValueError(
+                "Circular capability-pack dependency detected: "
+                + " -> ".join(cycle)
+            )
+        if pack_name not in PACK_DEFINITIONS:
+            raise ValueError(f"Unknown capability pack referenced: {pack_name}")
+
+        visiting.append(pack_name)
+        pack = PACK_DEFINITIONS.get(pack_name, {})
+        for dep in pack.get("depends_on", []):
+            visit(str(dep))
+        visiting.pop()
+
+        visited.add(pack_name)
+        resolved.append(pack_name)
+
+    for name in selected_packs:
+        visit(name)
+    return resolved
+
+
 def _select_packs(task_prompt: str, subtask_prompt: str, repo_root: str) -> list[str]:
     text = _normalize_text(f"{task_prompt}\n{subtask_prompt}\n{repo_root}")
     selected = list(BASE_PACKS)
 
     overrides = _parse_pack_overrides(task_prompt, subtask_prompt)
     if overrides:
-        return overrides
+        return _resolve_pack_dependencies(overrides)
 
     for pack_name, pack in PACK_DEFINITIONS.items():
         if pack_name in selected:
@@ -77,7 +109,7 @@ def _select_packs(task_prompt: str, subtask_prompt: str, repo_root: str) -> list
             if keyword in text:
                 selected.append(pack_name)
                 break
-    return selected
+    return _resolve_pack_dependencies(selected)
 
 
 def _score_skill(

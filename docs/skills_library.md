@@ -45,6 +45,12 @@ packs: infra-ops,review-qa
 
 This bypasses auto-selection and uses only the listed packs.
 
+Pack dependencies are expanded automatically (if configured in the catalog), so
+an override can still pull required foundational packs.
+
+Circular or unknown pack dependencies now fail fast during prompt build with a
+clear error message.
+
 ## Runtime Configuration
 
 - `SUPERGOD_SKILLS_ENABLED` (default: `true`)
