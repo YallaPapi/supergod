@@ -1,0 +1,19 @@
+{
+  "accounts": [
+    {
+      "account_id": "ig-main-01",
+      "username": "your_handle",
+      "profile_url": "https://www.instagram.com/your_handle/",
+      "cdp_url": "http://127.0.0.1:9222",
+      "tags": ["main", "client-a"]
+    },
+    {
+      "account_id": "ig-alt-02",
+      "profile_url": "https://www.instagram.com/another_handle/",
+      "user_data_dir": "C:/browser_profiles/ig-alt-02",
+      "executable_path": "C:/Program Files/Google/Chrome/Application/chrome.exe",
+      "tags": ["alt"]
+    }
+  ]
+}
+

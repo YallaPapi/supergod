@@ -1,0 +1,20 @@
+{
+  "observer": {
+    "adspower_api_base": "http://local.adspower.net:50325",
+    "adspower_user_id": "your_adspower_profile_id"
+  },
+  "targets": [
+    {
+      "target_id": "brand-main",
+      "profile_url": "https://www.instagram.com/instagram/",
+      "label": "Brand Main",
+      "tags": ["brand"]
+    },
+    {
+      "target_id": "competitor-1",
+      "profile_url": "https://www.instagram.com/natgeo/",
+      "label": "Competitor 1",
+      "tags": ["competitor"]
+    }
+  ]
+}

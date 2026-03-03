@@ -21,11 +21,16 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24.0",
 ]
+tracking = [
+    "playwright>=1.52.0",
+]
 
 [project.scripts]
 supergod = "supergod.client.cli:main"
 supergod-orchestrator = "supergod.orchestrator.server:main"
 supergod-worker = "supergod.worker.daemon:main"
+supergod-ig-snapshot = "supergod.tools.ig_snapshot_tracker:main"
+supergod-ig-reel-watch = "supergod.tools.ig_reel_watch:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
