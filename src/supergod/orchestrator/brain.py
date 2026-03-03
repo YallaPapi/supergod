@@ -24,6 +24,68 @@ class Subtask:
     depends_on: list[str]
 
 
+def validate_subtask_dependencies(
+    subtasks: list[Subtask],
+) -> tuple[bool, str]:
+    """Validate that a subtask dependency graph is executable."""
+    ids = [s.id for s in subtasks]
+    if len(ids) != len(set(ids)):
+        return False, "duplicate subtask ids in decomposition"
+
+    id_set = set(ids)
+    graph: dict[str, list[str]] = {}
+    for subtask in subtasks:
+        if not subtask.id:
+            return False, "empty subtask id in decomposition"
+        deps = subtask.depends_on or []
+        unknown = [dep for dep in deps if dep not in id_set]
+        if unknown:
+            return (
+                False,
+                f"subtask '{subtask.id}' depends on unknown id(s): {', '.join(unknown)}",
+            )
+        if subtask.id in deps:
+            return (
+                False,
+                f"subtask '{subtask.id}' cannot depend on itself",
+            )
+        graph[subtask.id] = deps
+
+    visiting: set[str] = set()
+    visited: set[str] = set()
+    stack: list[str] = []
+    cycle_path: list[str] = []
+
+    def _walk(node: str) -> bool:
+        nonlocal cycle_path
+        visiting.add(node)
+        stack.append(node)
+        for dep in graph.get(node, []):
+            if dep in visited:
+                continue
+            if dep in visiting:
+                start_idx = stack.index(dep)
+                cycle_path = stack[start_idx:] + [dep]
+                return True
+            if _walk(dep):
+                return True
+        stack.pop()
+        visiting.remove(node)
+        visited.add(node)
+        return False
+
+    for node in graph:
+        if node in visited:
+            continue
+        if _walk(node):
+            return (
+                False,
+                f"circular dependency detected: {' -> '.join(cycle_path)}",
+            )
+
+    return True, ""
+
+
 def _extract_json_array(text: str) -> list:
     """Extract a JSON array from text that may contain markdown or other noise.
 
@@ -173,16 +235,28 @@ async def decompose_task(
         if not desc:
             log.warning("Skipping subtask with no description: %s", item)
             continue
+        raw_depends = item.get("depends_on", [])
+        if not isinstance(raw_depends, list):
+            raw_depends = []
+        depends_on = [str(dep).strip() for dep in raw_depends if str(dep).strip()]
         subtasks.append(
             Subtask(
                 id=item.get("id", new_id()),
                 description=desc,
-                depends_on=item.get("depends_on", []),
+                depends_on=depends_on,
             )
         )
 
     if not subtasks:
         log.warning("Decomposition produced 0 valid subtasks from %d items. Falling back.", len(items))
+        return [Subtask(id=new_id(), description=prompt, depends_on=[])]
+
+    valid, error = validate_subtask_dependencies(subtasks)
+    if not valid:
+        log.warning(
+            "Invalid decomposition dependency graph (%s). Falling back to single subtask.",
+            error,
+        )
         return [Subtask(id=new_id(), description=prompt, depends_on=[])]
 
     log.info("Decomposed into %d subtasks", len(subtasks))

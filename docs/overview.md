@@ -116,6 +116,8 @@ We studied 10 open-source multi-agent frameworks (from Microsoft, Google, OpenAI
 
 **Cascade failure handling** — If subtask A fails and subtask B depends on A, then B is automatically cancelled. The system doesn't waste time on work that can never succeed.
 
+**Dependency graph validation** — Before execution starts, decomposition output is checked for unknown dependencies, self-dependencies, and circular references. Invalid graphs are rejected before workers are assigned.
+
 **Output validation** — Before accepting any worker's code, the system checks: Was code actually written? Does it touch the right files? Do basic tests pass? No garbage gets through.
 
 **Stuck detection** — If an AI worker starts repeating itself (a known failure mode), the system detects it, kills the stuck worker, and reassigns the task to another worker.
@@ -182,4 +184,3 @@ For context: this gives you 15 parallel AI agents that can build software, condu
 - **Skill library:** [docs/skills_library.md](skills_library.md) - Homogeneous workers with capability-pack prompt injection and curated skill imports
 - **Mission control dashboard:** [docs/mission_control_dashboard.md](mission_control_dashboard.md) - Browser UI for worker heartbeat, task lanes, and event timeline
 - **Ops hardening:** [docs/ops_hardening.md](ops_hardening.md) - Quoting-safe cluster operations, Git auto-sync, and anti-drift policy
-
