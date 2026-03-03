@@ -24,6 +24,66 @@ class Subtask:
     depends_on: list[str]
 
 
+def _normalize_subtask_dependencies(subtasks: list[Subtask]) -> list[Subtask]:
+    """Remove invalid deps and break cycles to avoid permanent scheduling deadlocks."""
+    if not subtasks:
+        return subtasks
+
+    by_id = {s.id: s for s in subtasks}
+    valid_ids = set(by_id)
+
+    # First pass: keep only valid, non-self dependencies.
+    for s in subtasks:
+        deps: list[str] = []
+        for dep in s.depends_on:
+            if dep == s.id:
+                log.warning("Ignoring self-dependency in subtask %s", s.id)
+                continue
+            if dep not in valid_ids:
+                log.warning(
+                    "Ignoring unknown dependency %s in subtask %s", dep, s.id
+                )
+                continue
+            deps.append(dep)
+        # Preserve order but dedupe.
+        s.depends_on = list(dict.fromkeys(deps))
+
+    # Second pass: detect cycles and clear dependencies for cycle members.
+    graph = {s.id: list(s.depends_on) for s in subtasks}
+    state: dict[str, int] = {}  # 0/absent=unvisited, 1=visiting, 2=done
+    stack: list[str] = []
+    in_cycle: set[str] = set()
+
+    def dfs(node: str) -> None:
+        state[node] = 1
+        stack.append(node)
+        for dep in graph.get(node, []):
+            dep_state = state.get(dep, 0)
+            if dep_state == 0:
+                dfs(dep)
+                continue
+            if dep_state == 1:
+                start = stack.index(dep)
+                in_cycle.update(stack[start:])
+        stack.pop()
+        state[node] = 2
+
+    for node in graph:
+        if state.get(node, 0) == 0:
+            dfs(node)
+
+    if in_cycle:
+        log.warning(
+            "Detected circular dependencies in decomposition: %s. "
+            "Clearing depends_on for those subtasks.",
+            sorted(in_cycle),
+        )
+        for node in in_cycle:
+            by_id[node].depends_on = []
+
+    return subtasks
+
+
 def _extract_json_array(text: str) -> list:
     """Extract a JSON array from text that may contain markdown or other noise.
 
@@ -185,6 +245,7 @@ async def decompose_task(
         log.warning("Decomposition produced 0 valid subtasks from %d items. Falling back.", len(items))
         return [Subtask(id=new_id(), description=prompt, depends_on=[])]
 
+    subtasks = _normalize_subtask_dependencies(subtasks)
     log.info("Decomposed into %d subtasks", len(subtasks))
     return subtasks
 
