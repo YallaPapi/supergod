@@ -24,6 +24,74 @@ class Subtask:
     depends_on: list[str]
 
 
+def _normalize_depends_on(raw: object) -> list[str]:
+    if not isinstance(raw, list):
+        return []
+    deps: list[str] = []
+    for dep in raw:
+        if isinstance(dep, str) and dep:
+            deps.append(dep)
+    return deps
+
+
+def _normalize_subtasks(subtasks: list[Subtask]) -> list[Subtask]:
+    """Normalize dependency lists and drop invalid dependency references."""
+    known_ids = {s.id for s in subtasks}
+    normalized: list[Subtask] = []
+
+    for st in subtasks:
+        seen: set[str] = set()
+        cleaned_deps: list[str] = []
+        for dep in st.depends_on:
+            if dep == st.id:
+                continue
+            if dep not in known_ids:
+                continue
+            if dep in seen:
+                continue
+            seen.add(dep)
+            cleaned_deps.append(dep)
+        normalized.append(
+            Subtask(id=st.id, description=st.description, depends_on=cleaned_deps)
+        )
+    return normalized
+
+
+def _has_duplicate_subtask_ids(subtasks: list[Subtask]) -> bool:
+    ids = [s.id for s in subtasks]
+    return len(ids) != len(set(ids))
+
+
+def _find_dependency_cycle(subtasks: list[Subtask]) -> list[str] | None:
+    """Return a cycle path if one exists, otherwise None."""
+    deps_by_id = {s.id: s.depends_on for s in subtasks}
+    state: dict[str, int] = {}  # 0/absent=unvisited, 1=visiting, 2=done
+    path: list[str] = []
+
+    def dfs(node: str) -> list[str] | None:
+        state[node] = 1
+        path.append(node)
+        for dep in deps_by_id.get(node, []):
+            dep_state = state.get(dep, 0)
+            if dep_state == 0:
+                cycle = dfs(dep)
+                if cycle:
+                    return cycle
+            elif dep_state == 1:
+                start = path.index(dep)
+                return path[start:] + [dep]
+        path.pop()
+        state[node] = 2
+        return None
+
+    for subtask_id in deps_by_id:
+        if state.get(subtask_id, 0) == 0:
+            cycle = dfs(subtask_id)
+            if cycle:
+                return cycle
+    return None
+
+
 def _extract_json_array(text: str) -> list:
     """Extract a JSON array from text that may contain markdown or other noise.
 
@@ -177,12 +245,27 @@ async def decompose_task(
             Subtask(
                 id=item.get("id", new_id()),
                 description=desc,
-                depends_on=item.get("depends_on", []),
+                depends_on=_normalize_depends_on(item.get("depends_on", [])),
             )
         )
 
     if not subtasks:
         log.warning("Decomposition produced 0 valid subtasks from %d items. Falling back.", len(items))
+        return [Subtask(id=new_id(), description=prompt, depends_on=[])]
+
+    if _has_duplicate_subtask_ids(subtasks):
+        log.warning(
+            "Decomposition produced duplicate subtask IDs. Falling back to single subtask."
+        )
+        return [Subtask(id=new_id(), description=prompt, depends_on=[])]
+
+    subtasks = _normalize_subtasks(subtasks)
+    cycle = _find_dependency_cycle(subtasks)
+    if cycle:
+        log.warning(
+            "Decomposition produced circular dependencies (%s). Falling back to single subtask.",
+            " -> ".join(cycle),
+        )
         return [Subtask(id=new_id(), description=prompt, depends_on=[])]
 
     log.info("Decomposed into %d subtasks", len(subtasks))
