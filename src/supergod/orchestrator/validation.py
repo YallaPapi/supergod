@@ -3,6 +3,17 @@
 import asyncio
 
 
+def _extract_head_sha(ls_remote_output: str) -> str:
+    """Extract the first commit SHA from git ls-remote output."""
+    if not ls_remote_output:
+        return ""
+    first_line = ls_remote_output.splitlines()[0].strip()
+    if not first_line:
+        return ""
+    parts = first_line.split()
+    return parts[0] if parts else ""
+
+
 async def _run(cmd: list[str], cwd: str) -> tuple[int, str, str]:
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -35,8 +46,16 @@ async def validate_completed_subtask(
     rc, out, _ = await _run(
         ["git", "ls-remote", "--heads", "origin", branch], workdir
     )
-    if rc != 0 or not out:
+    branch_head = _extract_head_sha(out)
+    if rc != 0 or not branch_head:
         return False, f"Validation failed: remote branch not found ({branch})"
+
+    # Ensure reported commit matches remote branch head.
+    if commit_sha != branch_head:
+        return False, (
+            "Validation failed: commit SHA does not match remote branch head "
+            f"({commit_sha} != {branch_head})"
+        )
 
     # Ensure branch head differs from main head (non-empty contribution).
     rc_main, out_main, _ = await _run(
@@ -45,8 +64,9 @@ async def validate_completed_subtask(
     if rc_main != 0 or not out_main:
         return True, ""
 
-    main_head = out_main.split()[0]
-    branch_head = out.split()[0]
+    main_head = _extract_head_sha(out_main)
+    if not main_head:
+        return True, ""
     if branch_head == main_head:
         return False, "Validation failed: branch head equals main (no effective changes)"
 
