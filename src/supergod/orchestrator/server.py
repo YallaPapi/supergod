@@ -1,6 +1,7 @@
 """Orchestrator server -- FastAPI with WebSocket endpoints for workers and clients."""
 
 import asyncio
+import json
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -17,6 +18,7 @@ from supergod.shared.config import (
     ENABLE_STUCK_DETECTION,
     LEASE_SWEEP_INTERVAL,
     MAX_WORKERS_PER_TASK,
+    PLANNING_INTERVAL,
     ORCHESTRATOR_HOST,
     ORCHESTRATOR_PORT,
     SUBTASK_LEASE_TIMEOUT,
@@ -48,7 +50,7 @@ from supergod.shared.protocol import (
     new_id,
     serialize,
 )
-from supergod.orchestrator.brain import decompose_task
+from supergod.orchestrator.brain import decompose_task, replan_check
 from supergod.orchestrator.git_manager import (
     merge_all_branches_with_report,
     run_tests,
@@ -70,6 +72,7 @@ db_path: str = DB_PATH
 chat_sessions: dict[str, dict] = {}
 _finalizing_tasks: set[str] = set()
 _finalize_lock = asyncio.Lock()
+_task_completion_counts: dict[str, int] = {}
 stuck_detector = StuckDetector()
 _lease_watchdog_task: asyncio.Task | None = None
 _dispatch_task: asyncio.Task | None = None
@@ -485,6 +488,7 @@ async def _handle_client_status(ws: WebSocket):
 
 
 async def _handle_client_cancel(ws: WebSocket, msg: ClientCancelMsg):
+    _task_completion_counts.pop(msg.task_id, None)
     await db.update_task_status(msg.task_id, TaskStatus.CANCELLED)
     subtasks = await db.get_subtasks_for_task(msg.task_id)
     cancelled_running = 0
@@ -856,6 +860,7 @@ async def worker_ws(ws: WebSocket):
 async def _process_task(task_id: str, prompt: str):
     """Full task lifecycle: decompose -> assign -> merge -> test."""
     try:
+        _task_completion_counts[task_id] = 0
         await db.update_task_status(task_id, TaskStatus.DECOMPOSING)
         await _save_checkpoint(task_id, "decomposing", {})
         await _broadcast_to_clients(
@@ -959,6 +964,7 @@ async def _check_task_progress(subtask_id: str):
     if newly_assigned:
         _metric_inc("subtasks_assigned_total", newly_assigned)
     if not await scheduler.all_subtasks_done(task_id):
+        await _maybe_replan_task(task_id)
         return
 
     async with _finalize_lock:
@@ -975,8 +981,10 @@ async def _check_task_progress(subtask_id: str):
 async def _finalize_task(task_id: str):
     task = await db.get_task(task_id)
     if not task:
+        _task_completion_counts.pop(task_id, None)
         return
     if task["status"] in (TaskStatus.COMPLETED, TaskStatus.FAILED):
+        _task_completion_counts.pop(task_id, None)
         return
 
     subtasks_rows = await db.get_subtasks_for_task(task_id)
@@ -1110,6 +1118,7 @@ async def _finalize_task(task_id: str):
             )
         )
         await _save_checkpoint(task_id, "task_completed", {})
+        _task_completion_counts.pop(task_id, None)
         return
 
     review = _build_task_review(
@@ -1149,6 +1158,251 @@ async def _finalize_task(task_id: str):
         "task_failed",
         {"summary": review["summary"][:500]},
     )
+    _task_completion_counts.pop(task_id, None)
+
+
+def _normalize_dep_id(task_id: str, dep_id: str) -> str:
+    dep_id = dep_id.strip()
+    if not dep_id:
+        return ""
+    if dep_id.startswith(f"{task_id}-"):
+        return dep_id
+    return f"{task_id}-{dep_id}"
+
+
+def _has_dependency_cycle(dep_graph: dict[str, set[str]]) -> bool:
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def _visit(node: str) -> bool:
+        if node in visited:
+            return False
+        if node in visiting:
+            return True
+        visiting.add(node)
+        for dep in dep_graph.get(node, set()):
+            if dep in dep_graph and _visit(dep):
+                return True
+        visiting.remove(node)
+        visited.add(node)
+        return False
+
+    return any(_visit(node) for node in dep_graph)
+
+
+async def _cancel_remaining_subtasks(task_id: str, reason: str) -> int:
+    rows = await db.get_subtasks_for_task(task_id)
+    cancelled = 0
+    for row in rows:
+        if row["status"] not in (TaskStatus.PENDING, TaskStatus.RUNNING):
+            continue
+        worker_name = row.get("worker_name")
+        if row["status"] == TaskStatus.RUNNING and worker_name:
+            wc = scheduler.workers.get(worker_name)
+            if wc:
+                try:
+                    await wc.ws.send_text(
+                        serialize(WorkerCancelMsg(task_id=row["subtask_id"]))
+                    )
+                except Exception:
+                    pass
+        await db.update_subtask(
+            row["subtask_id"],
+            status=TaskStatus.CANCELLED,
+            worker_name=None,
+            execution_token="",
+            failure_category="replanned",
+            error_message=f"Cancelled by replan: {reason}"[:500],
+        )
+        cancelled += 1
+    return cancelled
+
+
+async def _create_replan_subtasks(
+    task_id: str, task_prompt: str, raw_subtasks: list
+) -> tuple[int, str]:
+    if not isinstance(raw_subtasks, list) or not raw_subtasks:
+        return 0, "No subtasks supplied"
+
+    existing = await db.get_subtasks_for_task(task_id)
+    existing_ids = {row["subtask_id"] for row in existing}
+    existing_graph: dict[str, set[str]] = {}
+    for row in existing:
+        try:
+            deps = {
+                _normalize_dep_id(task_id, str(dep))
+                for dep in json.loads(row.get("depends_on") or "[]")
+                if str(dep).strip()
+            }
+        except Exception:
+            deps = set()
+        existing_graph[row["subtask_id"]] = deps
+
+    planned: list[dict] = []
+    planned_ids: set[str] = set()
+    for idx, item in enumerate(raw_subtasks, start=1):
+        if not isinstance(item, dict):
+            continue
+        description = str(item.get("description", "")).strip()
+        if not description:
+            continue
+        suggested = str(item.get("id", "")).strip() or f"rp{idx}-{new_id()[:4]}"
+        subtask_id = _normalize_dep_id(task_id, suggested)
+        if subtask_id in existing_ids or subtask_id in planned_ids:
+            subtask_id = _normalize_dep_id(task_id, f"rp{idx}-{new_id()[:6]}")
+        raw_deps = item.get("depends_on", [])
+        if not isinstance(raw_deps, list):
+            raw_deps = []
+        deps = [_normalize_dep_id(task_id, str(dep)) for dep in raw_deps if str(dep).strip()]
+        if subtask_id in deps:
+            return 0, f"Invalid self dependency in {subtask_id}"
+        planned.append(
+            {
+                "subtask_id": subtask_id,
+                "description": description,
+                "depends_on": deps,
+            }
+        )
+        planned_ids.add(subtask_id)
+
+    if not planned:
+        return 0, "No valid subtasks after validation"
+
+    valid_targets = existing_ids | planned_ids
+    for spec in planned:
+        missing = [dep for dep in spec["depends_on"] if dep not in valid_targets]
+        if missing:
+            return 0, f"Unknown dependency reference(s): {', '.join(missing[:3])}"
+
+    dep_graph = dict(existing_graph)
+    for spec in planned:
+        dep_graph[spec["subtask_id"]] = set(spec["depends_on"])
+    if _has_dependency_cycle(dep_graph):
+        return 0, "Dependency cycle detected in replanned subtasks"
+
+    for spec in planned:
+        worker_prompt, skill_meta = build_worker_subtask_prompt(
+            task_prompt=task_prompt,
+            subtask_prompt=spec["description"],
+            repo_root=workdir,
+        )
+        await db.create_subtask(
+            subtask_id=spec["subtask_id"],
+            task_id=task_id,
+            prompt=worker_prompt,
+            branch=f"task/{spec['subtask_id']}",
+            depends_on=spec["depends_on"],
+        )
+        await db.add_task_event(
+            task_id,
+            "skill_injection",
+            {
+                "subtask_id": spec["subtask_id"],
+                "packs": skill_meta.get("selected_packs", []),
+                "skills": skill_meta.get("selected_skills", []),
+                "profile": skill_meta.get("profile", "default"),
+            },
+        )
+    return len(planned), ""
+
+
+async def _apply_replan_plan(task_id: str, task_prompt: str, plan: dict) -> None:
+    action = str(plan.get("action", "continue"))
+    reason = str(plan.get("reason", "No reason provided")).strip() or "No reason provided"
+    created = 0
+    cancelled = 0
+
+    if action == "cancel_remaining":
+        cancelled = await _cancel_remaining_subtasks(task_id, reason)
+    elif action == "add_subtasks":
+        created, error = await _create_replan_subtasks(
+            task_id, task_prompt, plan.get("subtasks", [])
+        )
+        if error:
+            action = "continue"
+            reason = f"Replan ignored: {error}"
+    elif action == "replace_remaining":
+        cancelled = await _cancel_remaining_subtasks(task_id, reason)
+        created, error = await _create_replan_subtasks(
+            task_id, task_prompt, plan.get("subtasks", [])
+        )
+        if error:
+            action = "cancel_remaining"
+            reason = f"{reason}. Could not add replacement subtasks: {error}"
+    elif action != "continue":
+        action = "continue"
+        reason = f"Unsupported replan action: {plan.get('action')!r}"
+
+    await _save_checkpoint(
+        task_id,
+        "replan_applied",
+        {
+            "action": action,
+            "reason": reason[:500],
+            "created_subtasks": created,
+            "cancelled_subtasks": cancelled,
+        },
+    )
+    await _broadcast_to_clients(
+        serialize(
+            ProgressMsg(
+                task_id=task_id,
+                output=(
+                    f"Replan action={action}; reason={reason}; "
+                    f"created={created}; cancelled={cancelled}"
+                ),
+            )
+        )
+    )
+
+    assigned = await scheduler.try_assign_ready_subtasks_with_limit(task_id, max_assign=1)
+    if assigned:
+        _metric_inc("subtasks_assigned_total", assigned)
+
+
+async def _maybe_replan_task(task_id: str) -> None:
+    if PLANNING_INTERVAL <= 0:
+        return
+    task = await db.get_task(task_id)
+    if not task or task["status"] in (
+        TaskStatus.CANCELLED,
+        TaskStatus.PAUSED,
+        TaskStatus.FAILED,
+        TaskStatus.COMPLETED,
+    ):
+        return
+
+    _task_completion_counts[task_id] = _task_completion_counts.get(task_id, 0) + 1
+    if _task_completion_counts[task_id] % PLANNING_INTERVAL != 0:
+        return
+
+    subtasks = await db.get_subtasks_for_task(task_id)
+    completed = [s for s in subtasks if s["status"] == TaskStatus.COMPLETED]
+    remaining = [
+        s
+        for s in subtasks
+        if s["status"] in (TaskStatus.PENDING, TaskStatus.RUNNING)
+    ]
+    if not remaining:
+        return
+
+    plan = await replan_check(
+        original_prompt=task["prompt"],
+        completed_subtasks=completed,
+        remaining_subtasks=remaining,
+        workdir=workdir,
+    )
+    await _apply_replan_plan(task_id, task["prompt"], plan)
+    if await scheduler.all_subtasks_done(task_id):
+        async with _finalize_lock:
+            if task_id in _finalizing_tasks:
+                return
+            _finalizing_tasks.add(task_id)
+        try:
+            await _finalize_task(task_id)
+        finally:
+            async with _finalize_lock:
+                _finalizing_tasks.discard(task_id)
 
 
 def _build_task_review(

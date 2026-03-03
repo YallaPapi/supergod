@@ -8,13 +8,14 @@ import logging
 import re
 from dataclasses import dataclass
 
+from supergod.shared.config import BRAIN_PARSE_RETRIES
 from supergod.shared.protocol import new_id
 from supergod.worker.codex_runner import run_codex_collect
 
 log = logging.getLogger(__name__)
 
 # Max retry attempts when Codex returns unparseable output
-_MAX_PARSE_RETRIES = 1
+_MAX_PARSE_RETRIES = max(0, BRAIN_PARSE_RETRIES)
 
 
 @dataclass
@@ -241,3 +242,93 @@ async def evaluate_results(
                 "status": "unknown",
                 "summary": f"Failed to parse evaluator output: {text[:300]}",
             }
+
+
+REPLAN_PROMPT = """You are replanning an in-flight software task.
+
+Original task:
+{original_prompt}
+
+Completed subtasks:
+{completed_summary}
+
+Remaining subtasks:
+{remaining_summary}
+
+Return ONLY valid JSON object with this schema:
+{{
+  "action": "continue" | "cancel_remaining" | "add_subtasks" | "replace_remaining",
+  "reason": "brief reason",
+  "subtasks": [
+    {{
+      "id": "optional short id",
+      "description": "required when adding",
+      "depends_on": ["optional short/full ids"]
+    }}
+  ]
+}}
+
+Rules:
+- Prefer "continue" unless there is a clear reason to change plan.
+- Use add/replace only when new work is required.
+- Keep subtasks independent when possible.
+- Output raw JSON only.
+"""
+
+REPLAN_RETRY_PROMPT = """Respond with ONLY a valid JSON object.
+Required keys: "action", "reason".
+Valid actions: continue, cancel_remaining, add_subtasks, replace_remaining.
+If adding work, include "subtasks" list with description and optional depends_on.
+"""
+
+
+async def replan_check(
+    original_prompt: str,
+    completed_subtasks: list[dict],
+    remaining_subtasks: list[dict],
+    workdir: str = ".",
+) -> dict:
+    """Ask brain whether the remaining plan should change."""
+    completed_summary = "\n".join(
+        f"- {s.get('subtask_id', s.get('id', '?'))}: {s.get('prompt', s.get('description', ''))}"
+        for s in completed_subtasks
+    ) or "- none"
+    remaining_summary = "\n".join(
+        f"- {s.get('subtask_id', s.get('id', '?'))}: {s.get('prompt', s.get('description', ''))}"
+        for s in remaining_subtasks
+    ) or "- none"
+
+    full_prompt = REPLAN_PROMPT.format(
+        original_prompt=original_prompt,
+        completed_summary=completed_summary,
+        remaining_summary=remaining_summary,
+    )
+
+    for attempt in range(_MAX_PARSE_RETRIES + 1):
+        result = await run_codex_collect(prompt=full_prompt, workdir=workdir)
+        text = result.final_message.strip()
+        if not text:
+            return {"action": "continue", "reason": "Empty response from replanner"}
+        try:
+            plan = _extract_json_object(text)
+            action = plan.get("action")
+            if action not in {
+                "continue",
+                "cancel_remaining",
+                "add_subtasks",
+                "replace_remaining",
+            }:
+                return {
+                    "action": "continue",
+                    "reason": f"Invalid replanner action: {action!r}",
+                }
+            if "reason" not in plan or not str(plan.get("reason", "")).strip():
+                plan["reason"] = "No reason provided"
+            if "subtasks" in plan and not isinstance(plan["subtasks"], list):
+                plan["subtasks"] = []
+            return plan
+        except json.JSONDecodeError:
+            if attempt < _MAX_PARSE_RETRIES:
+                full_prompt = REPLAN_RETRY_PROMPT
+                continue
+            return {"action": "continue", "reason": "Failed to parse replanner output"}

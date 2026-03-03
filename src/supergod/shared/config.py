@@ -34,6 +34,7 @@ CODEX_KILL_TIMEOUT = int(os.getenv("SUPERGOD_CODEX_KILL_TIMEOUT", "5"))  # secon
 
 # Brain settings
 BRAIN_PARSE_RETRIES = int(os.getenv("SUPERGOD_BRAIN_PARSE_RETRIES", "1"))
+PLANNING_INTERVAL = int(os.getenv("SUPERGOD_PLANNING_INTERVAL", "3"))
 
 # Subtask retry settings
 SUBTASK_MAX_RETRIES = int(os.getenv("SUPERGOD_SUBTASK_MAX_RETRIES", "2"))

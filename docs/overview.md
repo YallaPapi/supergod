@@ -122,6 +122,8 @@ We studied 10 open-source multi-agent frameworks (from Microsoft, Google, OpenAI
 
 **Error-informed retries** — When retrying a failed task, the previous error message is included in the new instructions. The AI learns from its own mistakes instead of repeating them.
 
+**Adaptive replanning** — Every `N` subtask completions (`SUPERGOD_PLANNING_INTERVAL`, default `3`), the orchestrator asks the brain if the remaining plan should continue, be cancelled, or be replaced with better subtasks. Replans are checkpointed and dependency-cycle checked before execution.
+
 ---
 
 ## Infrastructure
@@ -182,4 +184,3 @@ For context: this gives you 15 parallel AI agents that can build software, condu
 - **Skill library:** [docs/skills_library.md](skills_library.md) - Homogeneous workers with capability-pack prompt injection and curated skill imports
 - **Mission control dashboard:** [docs/mission_control_dashboard.md](mission_control_dashboard.md) - Browser UI for worker heartbeat, task lanes, and event timeline
 - **Ops hardening:** [docs/ops_hardening.md](ops_hardening.md) - Quoting-safe cluster operations, Git auto-sync, and anti-drift policy
-
