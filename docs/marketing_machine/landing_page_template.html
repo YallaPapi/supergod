@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>30-Day Content Engine Pilot</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #f5f7f2;
+      --text: #121715;
+      --muted: #536059;
+      --card: #ffffff;
+      --line: #d9e1dc;
+      --cta: #0f7a4a;
+      --cta-hover: #0b5d39;
+      --accent: #dff3e8;
+      --shadow: 0 12px 30px rgba(18, 23, 21, 0.08);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: "IBM Plex Sans", sans-serif;
+      background:
+        radial-gradient(circle at 90% 0%, rgba(15, 122, 74, 0.12), transparent 35%),
+        radial-gradient(circle at 0% 100%, rgba(11, 93, 57, 0.08), transparent 30%),
+        var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+
+    .wrap {
+      width: min(1040px, 92vw);
+      margin: 0 auto;
+      padding: 24px 0 96px;
+    }
+
+    .hero {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      padding: 36px;
+      box-shadow: var(--shadow);
+      margin-top: 24px;
+    }
+
+    h1, h2, h3 {
+      margin: 0;
+      font-family: "Space Grotesk", sans-serif;
+      line-height: 1.1;
+    }
+
+    h1 {
+      font-size: clamp(2rem, 4vw, 3.2rem);
+      margin-bottom: 14px;
+    }
+
+    h2 {
+      font-size: clamp(1.4rem, 2.2vw, 2rem);
+      margin-bottom: 14px;
+    }
+
+    .lede {
+      color: var(--muted);
+      font-size: 1.1rem;
+      max-width: 65ch;
+      margin: 0 0 24px;
+    }
+
+    .pill-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-bottom: 24px;
+    }
+
+    .pill {
+      background: var(--accent);
+      border: 1px solid #badfcf;
+      color: #12402a;
+      padding: 8px 12px;
+      border-radius: 999px;
+      font-weight: 600;
+      font-size: 0.92rem;
+    }
+
+    .btn-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+
+    .btn {
+      display: inline-block;
+      text-decoration: none;
+      border-radius: 12px;
+      padding: 12px 18px;
+      font-weight: 600;
+      transition: transform .15s ease, background .15s ease;
+    }
+
+    .btn-primary {
+      background: var(--cta);
+      color: #fff;
+    }
+
+    .btn-primary:hover {
+      background: var(--cta-hover);
+      transform: translateY(-1px);
+    }
+
+    .btn-secondary {
+      border: 1px solid var(--line);
+      color: var(--text);
+      background: #fff;
+    }
+
+    .grid {
+      display: grid;
+      gap: 16px;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      margin-top: 28px;
+    }
+
+    .card {
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 18px;
+    }
+
+    .section {
+      margin-top: 28px;
+    }
+
+    ul {
+      margin: 10px 0 0;
+      padding-left: 18px;
+    }
+
+    li { margin-bottom: 7px; }
+
+    .steps {
+      counter-reset: s;
+      list-style: none;
+      padding: 0;
+      margin: 0;
+      display: grid;
+      gap: 12px;
+    }
+
+    .steps li {
+      counter-increment: s;
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 14px;
+    }
+
+    .steps li::before {
+      content: counter(s);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 26px;
+      height: 26px;
+      margin-right: 10px;
+      border-radius: 999px;
+      background: var(--accent);
+      font-weight: 700;
+      font-family: "Space Grotesk", sans-serif;
+    }
+
+    .faq details {
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 12px 14px;
+      margin-bottom: 10px;
+    }
+
+    .sticky {
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(255, 255, 255, 0.92);
+      border-top: 1px solid var(--line);
+      backdrop-filter: blur(6px);
+    }
+
+    .sticky-inner {
+      width: min(1040px, 92vw);
+      margin: 0 auto;
+      padding: 10px 0;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .small {
+      color: var(--muted);
+      font-size: 0.9rem;
+      margin-top: 12px;
+    }
+
+    @media (max-width: 640px) {
+      .hero { padding: 22px; }
+      .sticky-inner { justify-content: center; text-align: center; }
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <section class="hero">
+      <h1>Get 30 Days of Done-for-You Content in 7 Days</h1>
+      <p class="lede">
+        We run your full content loop: strategy, production, posting, and optimization.
+        Start with a paid pilot so you can validate results before a retainer.
+      </p>
+
+      <div class="pill-row">
+        <span class="pill">Pilot spots: 10/month</span>
+        <span class="pill">Turnaround: 7 days</span>
+        <span class="pill">Channels: Instagram + Reddit</span>
+      </div>
+
+      <div class="btn-row">
+        <a class="btn btn-primary" href="https://calendly.com/YOUR_HANDLE/pilot-fit-call?utm_source=landing&utm_medium=cta_top&utm_campaign=paid_pilot">Book a 15-min Fit Call</a>
+        <a class="btn btn-secondary" href="https://buy.stripe.com/YOUR_DEPOSIT_LINK?utm_source=landing&utm_medium=cta_top&utm_campaign=paid_pilot">Skip Call: Reserve with Deposit</a>
+      </div>
+      <p class="small">Deposit is applied to your pilot fee. If we are not a fit, it is refunded.</p>
+    </section>
+
+    <section class="section grid">
+      <article class="card">
+        <h3>Who This Is For</h3>
+        <ul>
+          <li>Founders and operators selling high-ticket services</li>
+          <li>Teams that can close leads but lack consistent content output</li>
+          <li>Businesses that want execution, not strategy PDFs</li>
+        </ul>
+      </article>
+      <article class="card">
+        <h3>What You Get</h3>
+        <ul>
+          <li>12 short-form videos + 20 platform-native posts</li>
+          <li>Caption + hook package for each asset</li>
+          <li>Posting automation and weekly metrics snapshot</li>
+        </ul>
+      </article>
+      <article class="card">
+        <h3>Pilot Price</h3>
+        <ul>
+          <li>$600 deposit to lock the slot</li>
+          <li>$1,400 due at kickoff (total $2,000 pilot)</li>
+          <li>Option to roll into monthly service afterward</li>
+        </ul>
+      </article>
+    </section>
+
+    <section class="section card">
+      <h2>How The Pilot Works</h2>
+      <ol class="steps">
+        <li>Book a 15-minute fit call or place deposit directly.</li>
+        <li>Complete a short intake form (5 minutes).</li>
+        <li>Kickoff within 48 hours and receive first content batch in 7 days.</li>
+      </ol>
+    </section>
+
+    <section class="section card">
+      <h2>Book Your Fit Call</h2>
+      <p>Use your Calendly event with a confirmation redirect to your intake form URL.</p>
+      <div class="calendly-inline-widget" data-url="https://calendly.com/YOUR_HANDLE/pilot-fit-call" style="min-width:320px;height:680px;"></div>
+      <script type="text/javascript" src="https://assets.calendly.com/assets/external/widget.js" async></script>
+    </section>
+
+    <section class="section card faq">
+      <h2>FAQ</h2>
+      <details>
+        <summary>What happens after I book?</summary>
+        You receive an intake form and kickoff slot options. We begin once intake and deposit are complete.
+      </details>
+      <details>
+        <summary>Do I need to appear on camera?</summary>
+        No. We can use voiceover, B-roll, and your existing assets.
+      </details>
+      <details>
+        <summary>What counts as success in the pilot?</summary>
+        On-time delivery, consistent posting, and a measurable lift in inbound replies/leads vs your previous 30 days.
+      </details>
+    </section>
+  </main>
+
+  <div class="sticky">
+    <div class="sticky-inner">
+      <strong>Ready to test a done-for-you content engine?</strong>
+      <a class="btn btn-primary" href="https://calendly.com/YOUR_HANDLE/pilot-fit-call?utm_source=landing&utm_medium=sticky&utm_campaign=paid_pilot">Book Fit Call</a>
+    </div>
+  </div>
+</body>
+</html>
