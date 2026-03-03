@@ -315,6 +315,67 @@ class StateDB:
                 ready.append(s)
         return ready
 
+    async def block_dependency_cycles(self, task_id: str) -> list[str]:
+        """Block pending subtasks that are part of a circular dependency."""
+        subtasks = await self.get_subtasks_for_task(task_id)
+        pending = {
+            s["subtask_id"]: s
+            for s in subtasks
+            if s["status"] == TaskStatus.PENDING
+        }
+        if not pending:
+            return []
+
+        deps_map: dict[str, list[str]] = {}
+        for sid, subtask in pending.items():
+            try:
+                deps = json.loads(subtask.get("depends_on", "[]"))
+            except Exception:
+                deps = []
+            deps_map[sid] = [d for d in deps if d in pending]
+
+        visit: dict[str, int] = {}
+        stack: list[str] = []
+        cycle_nodes: set[str] = set()
+
+        def _dfs(node: str) -> None:
+            visit[node] = 1
+            stack.append(node)
+            for dep in deps_map.get(node, []):
+                dep_state = visit.get(dep, 0)
+                if dep_state == 0:
+                    _dfs(dep)
+                    continue
+                if dep_state == 1:
+                    idx = stack.index(dep)
+                    cycle_nodes.update(stack[idx:])
+            stack.pop()
+            visit[node] = 2
+
+        for sid in deps_map:
+            if visit.get(sid, 0) == 0:
+                _dfs(sid)
+
+        if not cycle_nodes:
+            return []
+
+        cycle_ids = sorted(cycle_nodes)
+        detail = ", ".join(cycle_ids)
+        message = f"Circular dependency detected among subtasks: {detail}"
+        blocked: list[str] = []
+        for sid in cycle_ids:
+            current = await self.get_subtask(sid)
+            if not current or current["status"] != TaskStatus.PENDING:
+                continue
+            await self.update_subtask(
+                sid,
+                status=TaskStatus.BLOCKED,
+                failure_category="dependency_cycle",
+                error_message=message,
+            )
+            blocked.append(sid)
+        return blocked
+
     async def count_running_subtasks(self, task_id: str) -> int:
         async with self._db.execute(
             "SELECT COUNT(*) AS c FROM subtasks WHERE task_id = ? AND status = ?",

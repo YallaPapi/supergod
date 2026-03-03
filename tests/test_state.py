@@ -197,6 +197,36 @@ async def test_get_ready_subtasks_skips_running(db: StateDB):
     assert len(ready) == 0
 
 
+async def test_block_dependency_cycles_blocks_cyclic_pending_subtasks(db: StateDB):
+    await db.create_task("t1", "Build auth")
+    await db.create_subtask("t1-s1", "t1", "Step 1", "b1", depends_on=["t1-s2"])
+    await db.create_subtask("t1-s2", "t1", "Step 2", "b2", depends_on=["t1-s1"])
+
+    blocked = await db.block_dependency_cycles("t1")
+    assert set(blocked) == {"t1-s1", "t1-s2"}
+
+    s1 = await db.get_subtask("t1-s1")
+    s2 = await db.get_subtask("t1-s2")
+    assert s1["status"] == TaskStatus.BLOCKED
+    assert s2["status"] == TaskStatus.BLOCKED
+    assert s1["failure_category"] == "dependency_cycle"
+    assert s2["failure_category"] == "dependency_cycle"
+
+
+async def test_block_dependency_cycles_noop_for_acyclic_graph(db: StateDB):
+    await db.create_task("t1", "Build auth")
+    await db.create_subtask("t1-s1", "t1", "Step 1", "b1")
+    await db.create_subtask("t1-s2", "t1", "Step 2", "b2", depends_on=["t1-s1"])
+
+    blocked = await db.block_dependency_cycles("t1")
+    assert blocked == []
+
+    s1 = await db.get_subtask("t1-s1")
+    s2 = await db.get_subtask("t1-s2")
+    assert s1["status"] == TaskStatus.PENDING
+    assert s2["status"] == TaskStatus.PENDING
+
+
 # --- Worker operations ---
 
 

@@ -250,6 +250,27 @@ async def test_try_assign_ready_subtasks_respects_deps(scheduler: Scheduler, db:
     assert assigned == 1
 
 
+async def test_try_assign_ready_subtasks_blocks_dependency_cycles(
+    scheduler: Scheduler, db: StateDB
+):
+    ws1 = make_mock_ws()
+    await scheduler.register_worker("w1", ws1)
+
+    await db.create_task("t1", "Build auth")
+    await db.create_subtask("t1-s1", "t1", "Step 1", "b1", depends_on=["t1-s2"])
+    await db.create_subtask("t1-s2", "t1", "Step 2", "b2", depends_on=["t1-s1"])
+
+    assigned = await scheduler.try_assign_ready_subtasks("t1")
+    assert assigned == 0
+
+    s1 = await db.get_subtask("t1-s1")
+    s2 = await db.get_subtask("t1-s2")
+    assert s1["status"] == TaskStatus.BLOCKED
+    assert s2["status"] == TaskStatus.BLOCKED
+    assert s1["failure_category"] == "dependency_cycle"
+    assert s2["failure_category"] == "dependency_cycle"
+
+
 async def test_try_assign_limited_by_workers(scheduler: Scheduler, db: StateDB):
     ws = make_mock_ws()
     await scheduler.register_worker("w1", ws)

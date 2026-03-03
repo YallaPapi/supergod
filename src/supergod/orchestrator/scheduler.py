@@ -334,6 +334,14 @@ class Scheduler:
         ):
             return 0
 
+        blocked_cycles = await self.db.block_dependency_cycles(task_id)
+        if blocked_cycles:
+            log.warning(
+                "Blocked %d subtasks due to circular dependencies: %s",
+                len(blocked_cycles),
+                ", ".join(blocked_cycles),
+            )
+
         ready = await self.db.get_ready_subtasks(task_id)
         assigned = 0
         for subtask in ready:
