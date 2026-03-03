@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import parse_qs
@@ -868,6 +869,7 @@ async def _process_task(task_id: str, prompt: str):
         if task and task["status"] == TaskStatus.CANCELLED:
             log.info("Task %s cancelled during decomposition", task_id)
             return
+        _validate_subtask_dependencies(task_id, subtasks)
 
         # Create subtasks in DB
         for st in subtasks:
@@ -935,6 +937,54 @@ async def _process_task(task_id: str, prompt: str):
         )
         await _broadcast_to_clients(
             serialize(TaskFailedMsg(task_id=task_id, error=str(e)))
+        )
+
+
+def _validate_subtask_dependencies(task_id: str, subtasks: list) -> None:
+    """Validate dependency graph before creating subtasks in DB."""
+    ids = {str(st.id) for st in subtasks}
+
+    # 1) All dependencies must reference existing subtasks.
+    missing: list[tuple[str, str]] = []
+    for st in subtasks:
+        for dep in (st.depends_on or []):
+            if str(dep) not in ids:
+                missing.append((str(st.id), str(dep)))
+    if missing:
+        pairs = ", ".join(f"{sid}->{dep}" for sid, dep in missing[:5])
+        if len(missing) > 5:
+            pairs += ", ..."
+        raise ValueError(
+            f"Invalid decomposition: unknown dependency reference(s): {pairs}"
+        )
+
+    # 2) Dependency graph must be acyclic.
+    indegree: dict[str, int] = {str(st.id): 0 for st in subtasks}
+    dependents: dict[str, list[str]] = {str(st.id): [] for st in subtasks}
+    for st in subtasks:
+        sid = str(st.id)
+        for dep in (st.depends_on or []):
+            dep_id = str(dep)
+            indegree[sid] += 1
+            dependents[dep_id].append(sid)
+
+    queue = deque([sid for sid, deg in indegree.items() if deg == 0])
+    visited = 0
+    while queue:
+        cur = queue.popleft()
+        visited += 1
+        for nxt in dependents[cur]:
+            indegree[nxt] -= 1
+            if indegree[nxt] == 0:
+                queue.append(nxt)
+
+    if visited != len(subtasks):
+        cycle_nodes = sorted([sid for sid, deg in indegree.items() if deg > 0])
+        suffix = ", ".join(cycle_nodes[:8])
+        if len(cycle_nodes) > 8:
+            suffix += ", ..."
+        raise ValueError(
+            f"Invalid decomposition: circular dependencies detected among: {suffix}"
         )
 
 
