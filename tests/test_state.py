@@ -197,6 +197,37 @@ async def test_get_ready_subtasks_skips_running(db: StateDB):
     assert len(ready) == 0
 
 
+async def test_analyze_dependency_issues_no_issues(db: StateDB):
+    await db.create_task("t1", "Build auth")
+    await db.create_subtask("t1-s1", "t1", "Step 1", "b1")
+    await db.create_subtask("t1-s2", "t1", "Step 2", "b2", depends_on=["t1-s1"])
+
+    issues = await db.analyze_dependency_issues("t1")
+    assert issues["cycle_nodes"] == []
+    assert issues["missing_dependencies"] == {}
+
+
+async def test_analyze_dependency_issues_missing_dependency(db: StateDB):
+    await db.create_task("t1", "Build auth")
+    await db.create_subtask(
+        "t1-s1", "t1", "Step 1", "b1", depends_on=["t1-missing"]
+    )
+
+    issues = await db.analyze_dependency_issues("t1")
+    assert issues["cycle_nodes"] == []
+    assert issues["missing_dependencies"] == {"t1-s1": ["t1-missing"]}
+
+
+async def test_analyze_dependency_issues_detects_cycle(db: StateDB):
+    await db.create_task("t1", "Build auth")
+    await db.create_subtask("t1-s1", "t1", "Step 1", "b1", depends_on=["t1-s2"])
+    await db.create_subtask("t1-s2", "t1", "Step 2", "b2", depends_on=["t1-s1"])
+
+    issues = await db.analyze_dependency_issues("t1")
+    assert set(issues["cycle_nodes"]) == {"t1-s1", "t1-s2"}
+    assert issues["missing_dependencies"] == {}
+
+
 # --- Worker operations ---
 
 

@@ -420,6 +420,41 @@ async def test_process_task_records_skill_injection_events(app_with_db):
     assert any(e["event_type"] == "skill_injection" for e in events)
 
 
+async def test_process_task_blocks_invalid_dependency_cycle(app_with_db):
+    app, db, scheduler = app_with_db
+    import supergod.orchestrator.server as srv
+    from supergod.orchestrator.brain import Subtask
+
+    await db.create_task("t1", "Build auth system")
+    mock_subtasks = [
+        Subtask(id="1", description="Build login", depends_on=["2"]),
+        Subtask(id="2", description="Build signup", depends_on=["1"]),
+    ]
+
+    async def fake_has_remote(workdir):
+        return False
+
+    async def fake_tests(workdir):
+        return True, "ok"
+
+    with patch(
+        "supergod.orchestrator.server.decompose_task",
+        return_value=mock_subtasks,
+    ), patch("supergod.worker.git_ops.has_remote", fake_has_remote), patch(
+        "supergod.orchestrator.server.run_tests",
+        fake_tests,
+    ):
+        await srv._process_task("t1", "Build auth system")
+
+    task = await db.get_task("t1")
+    subtasks = await db.get_subtasks_for_task("t1")
+    assert task["status"] == TaskStatus.FAILED
+    assert all(s["status"] == TaskStatus.BLOCKED for s in subtasks)
+    assert all(
+        s["failure_category"] == "invalid_dependency_cycle" for s in subtasks
+    )
+
+
 # --- _extract_text helper ---
 
 

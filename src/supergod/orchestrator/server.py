@@ -895,6 +895,68 @@ async def _process_task(task_id: str, prompt: str):
                     "profile": skill_meta.get("profile", "default"),
                 },
             )
+
+        dep_issues = await db.analyze_dependency_issues(task_id)
+        cycle_nodes = dep_issues["cycle_nodes"]
+        missing_dependencies = dep_issues["missing_dependencies"]
+        blocked_for_validation = 0
+
+        if cycle_nodes:
+            cycle_preview = ", ".join(cycle_nodes[:8])
+            cycle_error = (
+                f"Circular dependency detected in subtask DAG: {cycle_preview}"
+            )
+            for sid in cycle_nodes:
+                subtask = await db.get_subtask(sid)
+                if not subtask or subtask["status"] != TaskStatus.PENDING:
+                    continue
+                await db.update_subtask(
+                    sid,
+                    status=TaskStatus.BLOCKED,
+                    failure_category="invalid_dependency_cycle",
+                    error_message=cycle_error,
+                )
+                blocked_for_validation += 1
+
+        for sid, missing in missing_dependencies.items():
+            subtask = await db.get_subtask(sid)
+            if not subtask or subtask["status"] != TaskStatus.PENDING:
+                continue
+            await db.update_subtask(
+                sid,
+                status=TaskStatus.BLOCKED,
+                failure_category="missing_dependency",
+                error_message=(
+                    "Invalid dependency reference(s): "
+                    + ", ".join(sorted(set(missing)))
+                ),
+            )
+            blocked_for_validation += 1
+
+        if blocked_for_validation:
+            await _broadcast_to_clients(
+                serialize(
+                    ProgressMsg(
+                        task_id=task_id,
+                        output=(
+                            "Dependency validation blocked "
+                            f"{blocked_for_validation} subtask(s)."
+                        ),
+                    )
+                )
+            )
+            await _save_checkpoint(
+                task_id,
+                "dependency_validation",
+                {
+                    "blocked_count": blocked_for_validation,
+                    "cycle_nodes": cycle_nodes,
+                    "missing_dependency_subtasks": sorted(
+                        missing_dependencies.keys()
+                    ),
+                },
+            )
+
         await _save_checkpoint(
             task_id,
             "decomposed",
@@ -923,6 +985,8 @@ async def _process_task(task_id: str, prompt: str):
                 )
             )
         )
+        if await db.all_terminal(task_id):
+            await _finalize_task(task_id)
 
     except Exception as e:
         log.error("Task processing failed: %s", e, exc_info=True)

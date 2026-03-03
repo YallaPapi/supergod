@@ -315,6 +315,53 @@ class StateDB:
                 ready.append(s)
         return ready
 
+    async def analyze_dependency_issues(self, task_id: str) -> dict:
+        """Detect missing references and circular dependencies for a task DAG."""
+        subtasks = await self.get_subtasks_for_task(task_id)
+        ids = {s["subtask_id"] for s in subtasks}
+        deps_by_id: dict[str, list[str]] = {}
+        missing_dependencies: dict[str, list[str]] = {}
+
+        for s in subtasks:
+            sid = s["subtask_id"]
+            deps = json.loads(s["depends_on"])
+            deps_by_id[sid] = [d for d in deps if d in ids]
+            missing = sorted({d for d in deps if d not in ids})
+            if missing:
+                missing_dependencies[sid] = missing
+
+        cycle_nodes: set[str] = set()
+        color: dict[str, int] = {sid: 0 for sid in ids}  # 0=unvisited,1=visiting,2=done
+        path: list[str] = []
+        path_index: dict[str, int] = {}
+
+        def dfs(node: str) -> None:
+            color[node] = 1
+            path_index[node] = len(path)
+            path.append(node)
+
+            for dep in deps_by_id.get(node, []):
+                dep_color = color.get(dep, 0)
+                if dep_color == 0:
+                    dfs(dep)
+                elif dep_color == 1:
+                    start = path_index.get(dep, 0)
+                    cycle_nodes.update(path[start:])
+                    cycle_nodes.add(dep)
+
+            path.pop()
+            path_index.pop(node, None)
+            color[node] = 2
+
+        for sid in ids:
+            if color[sid] == 0:
+                dfs(sid)
+
+        return {
+            "cycle_nodes": sorted(cycle_nodes),
+            "missing_dependencies": missing_dependencies,
+        }
+
     async def count_running_subtasks(self, task_id: str) -> int:
         async with self._db.execute(
             "SELECT COUNT(*) AS c FROM subtasks WHERE task_id = ? AND status = ?",
