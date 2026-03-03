@@ -122,6 +122,8 @@ We studied 10 open-source multi-agent frameworks (from Microsoft, Google, OpenAI
 
 **Error-informed retries** — When retrying a failed task, the previous error message is included in the new instructions. The AI learns from its own mistakes instead of repeating them.
 
+**Parser hardening for AI output** — The planner/evaluator tolerate noisy responses (markdown wrappers, surrounding text, partial trailing junk) by extracting balanced JSON spans and retrying once with a stricter prompt.
+
 ---
 
 ## Infrastructure
@@ -182,4 +184,3 @@ For context: this gives you 15 parallel AI agents that can build software, condu
 - **Skill library:** [docs/skills_library.md](skills_library.md) - Homogeneous workers with capability-pack prompt injection and curated skill imports
 - **Mission control dashboard:** [docs/mission_control_dashboard.md](mission_control_dashboard.md) - Browser UI for worker heartbeat, task lanes, and event timeline
 - **Ops hardening:** [docs/ops_hardening.md](ops_hardening.md) - Quoting-safe cluster operations, Git auto-sync, and anti-drift policy
-

@@ -24,6 +24,44 @@ class Subtask:
     depends_on: list[str]
 
 
+def _extract_balanced_json_span(
+    text: str, open_char: str, close_char: str
+) -> str | None:
+    """Return first balanced {...} or [...] span, ignoring bracket chars in strings."""
+    start = text.find(open_char)
+    if start == -1:
+        return None
+
+    depth = 0
+    in_string = False
+    escaping = False
+    for i in range(start, len(text)):
+        ch = text[i]
+
+        if in_string:
+            if escaping:
+                escaping = False
+                continue
+            if ch == "\\":
+                escaping = True
+                continue
+            if ch == '"':
+                in_string = False
+            continue
+
+        if ch == '"':
+            in_string = True
+            continue
+        if ch == open_char:
+            depth += 1
+            continue
+        if ch == close_char:
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
+
+
 def _extract_json_array(text: str) -> list:
     """Extract a JSON array from text that may contain markdown or other noise.
 
@@ -42,11 +80,11 @@ def _extract_json_array(text: str) -> list:
     except json.JSONDecodeError:
         pass
 
-    # Strategy 2: regex for outermost square brackets
-    match = re.search(r"\[.*\]", text, re.DOTALL)
-    if match:
+    # Strategy 2: extract first balanced square-bracket span
+    candidate = _extract_balanced_json_span(text, "[", "]")
+    if candidate:
         try:
-            result = json.loads(match.group())
+            result = json.loads(candidate)
             if isinstance(result, list):
                 return result
         except json.JSONDecodeError:
@@ -55,10 +93,10 @@ def _extract_json_array(text: str) -> list:
     # Strategy 3: strip markdown fences
     cleaned = re.sub(r"```(?:json)?\s*", "", text)
     cleaned = cleaned.strip()
-    match = re.search(r"\[.*\]", cleaned, re.DOTALL)
-    if match:
+    candidate = _extract_balanced_json_span(cleaned, "[", "]")
+    if candidate:
         try:
-            result = json.loads(match.group())
+            result = json.loads(candidate)
             if isinstance(result, list):
                 return result
         except json.JSONDecodeError:
@@ -85,11 +123,11 @@ def _extract_json_object(text: str) -> dict:
     except json.JSONDecodeError:
         pass
 
-    # Strategy 2: regex for outermost curly brackets
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if match:
+    # Strategy 2: extract first balanced curly-brace span
+    candidate = _extract_balanced_json_span(text, "{", "}")
+    if candidate:
         try:
-            result = json.loads(match.group())
+            result = json.loads(candidate)
             if isinstance(result, dict):
                 return result
         except json.JSONDecodeError:
@@ -98,10 +136,10 @@ def _extract_json_object(text: str) -> dict:
     # Strategy 3: strip markdown fences
     cleaned = re.sub(r"```(?:json)?\s*", "", text)
     cleaned = cleaned.strip()
-    match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-    if match:
+    candidate = _extract_balanced_json_span(cleaned, "{", "}")
+    if candidate:
         try:
-            result = json.loads(match.group())
+            result = json.loads(candidate)
             if isinstance(result, dict):
                 return result
         except json.JSONDecodeError:
