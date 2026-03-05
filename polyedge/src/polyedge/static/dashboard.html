@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PolyEdge Mission Control</title>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-0: #0a1220; --bg-1: #111d34; --bg-2: #1a2c4a;
+      --fg: #eef5ff; --muted: #a9bdd8; --line: #2d4771;
+      --ok: #24d18a; --warn: #ffbc42; --bad: #ff5d73; --busy: #5fa8ff;
+      --panel: rgba(14, 26, 45, 0.86);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      color: var(--fg); font-family: "Space Grotesk", sans-serif;
+      background: linear-gradient(160deg, var(--bg-0), var(--bg-1) 40%, var(--bg-2));
+      min-height: 100vh; padding: 20px;
+    }
+    h1 { font-size: 1.8rem; margin-bottom: 6px; }
+    h1 span { color: var(--busy); }
+    .subtitle { color: var(--muted); font-size: 0.9rem; margin-bottom: 20px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 20px; }
+    .card {
+      background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+      padding: 16px; backdrop-filter: blur(8px);
+    }
+    .card-label { color: var(--muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 1px; }
+    .card-value { font-size: 1.8rem; font-weight: 700; font-family: "JetBrains Mono", monospace; margin-top: 4px; }
+    .card-sub { color: var(--muted); font-size: 0.8rem; margin-top: 2px; }
+    .section { margin-bottom: 24px; }
+    .section-title { font-size: 1.1rem; font-weight: 600; margin-bottom: 10px; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
+    .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 900px) { .two-col { grid-template-columns: 1fr; } }
+    table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+    th { text-align: left; color: var(--muted); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 1px; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+    td { padding: 6px 8px; border-bottom: 1px solid rgba(45,71,113,0.3); vertical-align: top; }
+    tr:hover { background: rgba(95,168,255,0.05); }
+    .tag {
+      display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.7rem;
+      font-family: "JetBrains Mono", monospace; font-weight: 600;
+    }
+    .tag-grok { background: rgba(255,188,66,0.2); color: var(--warn); }
+    .tag-perplexity { background: rgba(95,168,255,0.2); color: var(--busy); }
+    .tag-codex { background: rgba(36,209,138,0.2); color: var(--ok); }
+    .tag-yes { background: rgba(36,209,138,0.2); color: var(--ok); }
+    .tag-no { background: rgba(255,93,115,0.2); color: var(--bad); }
+    .bar-row { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+    .bar-label { width: 100px; font-size: 0.75rem; color: var(--muted); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .bar-track { flex: 1; height: 16px; background: rgba(45,71,113,0.3); border-radius: 3px; overflow: hidden; }
+    .bar-fill { height: 100%; border-radius: 3px; transition: width 0.5s; }
+    .bar-count { width: 40px; font-size: 0.75rem; font-family: "JetBrains Mono", monospace; }
+    .pulse { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--ok); animation: pulse 2s infinite; margin-right: 6px; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+    .timestamp { color: var(--muted); font-size: 0.7rem; font-family: "JetBrains Mono", monospace; }
+    .q-text { max-width: 350px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .confidence { font-family: "JetBrains Mono", monospace; font-size: 0.8rem; }
+    #status-line { color: var(--muted); font-size: 0.75rem; margin-bottom: 16px; }
+  </style>
+</head>
+<body>
+  <h1><span>PolyEdge</span> Mission Control</h1>
+  <div class="subtitle">Polymarket Prediction Engine &mdash; Research &bull; Predict &bull; Score</div>
+  <div id="status-line"><span class="pulse"></span>Loading...</div>
+
+  <!-- Stats Cards -->
+  <div class="grid" id="stats-grid"></div>
+
+  <!-- Factor Breakdown + Weights -->
+  <div class="two-col">
+    <div class="section card">
+      <div class="section-title">Factor Sources</div>
+      <div id="source-bars"></div>
+      <div style="margin-top:16px">
+        <div class="section-title">Factor Categories (top 15)</div>
+        <div id="cat-bars"></div>
+      </div>
+    </div>
+    <div class="section card">
+      <div class="section-title">Category Performance</div>
+      <div id="weights-table-wrap"><p style="color:var(--muted);font-size:0.85rem">No scored predictions yet. Weights appear after markets resolve.</p></div>
+    </div>
+  </div>
+
+  <!-- Recent Factors -->
+  <div class="section card">
+    <div class="section-title">Recent Research Factors</div>
+    <div style="overflow-x:auto">
+      <table id="factors-table">
+        <thead><tr><th>Time</th><th>Source</th><th>Category</th><th>Name</th><th>Value</th><th>Confidence</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Recent Predictions -->
+  <div class="section card">
+    <div class="section-title">Recent Predictions</div>
+    <div style="overflow-x:auto">
+      <table id="preds-table">
+        <thead><tr><th>Time</th><th>Market</th><th>Prediction</th><th>Confidence</th><th>Entry Price</th><th>Result</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Top Markets -->
+  <div class="section card">
+    <div class="section-title">Top Active Markets (by volume)</div>
+    <div style="overflow-x:auto">
+      <table id="markets-table">
+        <thead><tr><th>Market</th><th>Category</th><th>YES Price</th><th>Volume</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+<script>
+const API = '';
+let refreshCount = 0;
+
+function ago(ts) {
+  if (!ts || ts === 'None') return '—';
+  const d = new Date(ts);
+  const s = Math.floor((Date.now() - d.getTime()) / 1000);
+  if (s < 60) return s + 's ago';
+  if (s < 3600) return Math.floor(s/60) + 'm ago';
+  if (s < 86400) return Math.floor(s/3600) + 'h ago';
+  return Math.floor(s/86400) + 'd ago';
+}
+
+function sourceTag(src) {
+  const cls = src === 'grok' ? 'tag-grok' : src === 'perplexity' ? 'tag-perplexity' : 'tag-codex';
+  return `<span class="tag ${cls}">${src}</span>`;
+}
+
+function predTag(outcome) {
+  const cls = outcome === 'YES' ? 'tag-yes' : 'tag-no';
+  return `<span class="tag ${cls}">${outcome}</span>`;
+}
+
+function resultTag(correct) {
+  if (correct === null || correct === undefined) return '<span class="tag" style="background:rgba(169,189,216,0.1);color:var(--muted)">pending</span>';
+  return correct ? '<span class="tag tag-yes">correct</span>' : '<span class="tag tag-no">wrong</span>';
+}
+
+function bars(data, colors) {
+  const max = Math.max(...Object.values(data), 1);
+  return Object.entries(data).map(([k, v]) => {
+    const pct = (v / max * 100).toFixed(1);
+    const color = colors[k] || 'var(--busy)';
+    return `<div class="bar-row">
+      <div class="bar-label" title="${k}">${k}</div>
+      <div class="bar-track"><div class="bar-fill" style="width:${pct}%;background:${color}"></div></div>
+      <div class="bar-count">${v}</div>
+    </div>`;
+  }).join('');
+}
+
+const srcColors = { grok: 'var(--warn)', perplexity: 'var(--busy)', codex: 'var(--ok)' };
+const catColors = {};
+
+async function refresh() {
+  try {
+    const [stats, factors, preds, markets, weights] = await Promise.all([
+      fetch(API + '/api/stats').then(r => r.json()),
+      fetch(API + '/api/factors/recent?limit=30').then(r => r.json()),
+      fetch(API + '/api/predictions/recent?limit=30').then(r => r.json()),
+      fetch(API + '/api/markets?limit=20').then(r => r.json()),
+      fetch(API + '/api/factors/weights').then(r => r.json()),
+    ]);
+
+    // Status line
+    document.getElementById('status-line').innerHTML =
+      `<span class="pulse"></span>Live &mdash; Last poll: ${ago(stats.last_poll_at)} &bull; Last research: ${ago(stats.last_factor_at)} &bull; Last prediction: ${ago(stats.last_prediction_at)} &bull; Refresh #${++refreshCount}`;
+
+    // Stats cards
+    document.getElementById('stats-grid').innerHTML = [
+      { label: 'Active Markets', value: stats.active_markets?.toLocaleString(), sub: `${stats.total_markets?.toLocaleString()} total` },
+      { label: 'Factors Collected', value: stats.total_factors?.toLocaleString(), sub: Object.entries(stats.factors_by_source || {}).map(([k,v]) => `${k}: ${v}`).join(' / ') },
+      { label: 'Predictions Made', value: stats.total_predictions?.toLocaleString(), sub: stats.scored_predictions ? `${stats.scored_predictions} scored` : 'none scored yet' },
+      { label: 'Hit Rate', value: stats.overall_hit_rate ? (stats.overall_hit_rate * 100).toFixed(1) + '%' : '—', sub: stats.correct_predictions ? `${stats.correct_predictions}/${stats.scored_predictions} correct` : 'awaiting market resolutions' },
+    ].map(c => `<div class="card"><div class="card-label">${c.label}</div><div class="card-value">${c.value}</div><div class="card-sub">${c.sub}</div></div>`).join('');
+
+    // Source bars
+    document.getElementById('source-bars').innerHTML = bars(stats.factors_by_source || {}, srcColors);
+
+    // Category bars
+    document.getElementById('cat-bars').innerHTML = bars(stats.factors_by_category || {}, catColors);
+
+    // Weights table
+    if (weights.length) {
+      document.getElementById('weights-table-wrap').innerHTML = `<table>
+        <thead><tr><th>Category</th><th>Hit Rate</th><th>Total</th><th>Correct</th><th>Weight</th></tr></thead>
+        <tbody>${weights.map(w => `<tr>
+          <td>${w.category}</td>
+          <td class="confidence" style="color:${w.hit_rate > 0.55 ? 'var(--ok)' : w.hit_rate < 0.45 ? 'var(--bad)' : 'var(--muted)'}">${(w.hit_rate*100).toFixed(1)}%</td>
+          <td>${w.total}</td><td>${w.correct}</td>
+          <td class="confidence">${w.weight.toFixed(2)}</td>
+        </tr>`).join('')}</tbody></table>`;
+    }
+
+    // Recent factors
+    document.querySelector('#factors-table tbody').innerHTML = factors.map(f => `<tr>
+      <td class="timestamp">${ago(f.timestamp)}</td>
+      <td>${sourceTag(f.source)}</td>
+      <td><span class="tag" style="background:rgba(95,168,255,0.1);color:var(--busy)">${f.category}</span></td>
+      <td>${f.name}</td>
+      <td style="max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${f.value}">${f.value}</td>
+      <td class="confidence">${f.confidence?.toFixed(2) ?? '—'}</td>
+    </tr>`).join('');
+
+    // Recent predictions
+    document.querySelector('#preds-table tbody').innerHTML = preds.map(p => `<tr>
+      <td class="timestamp">${ago(p.created_at)}</td>
+      <td class="q-text" title="${p.market_question}">${p.market_question}</td>
+      <td>${predTag(p.predicted_outcome)}</td>
+      <td class="confidence">${(p.confidence*100).toFixed(1)}%</td>
+      <td class="confidence">${(p.entry_yes_price*100).toFixed(1)}%</td>
+      <td>${resultTag(p.correct)}</td>
+    </tr>`).join('');
+
+    // Top markets
+    document.querySelector('#markets-table tbody').innerHTML = markets.map(m => `<tr>
+      <td class="q-text" title="${m.question}">${m.question}</td>
+      <td><span class="tag" style="background:rgba(95,168,255,0.1);color:var(--busy)">${m.category || '—'}</span></td>
+      <td class="confidence">${(m.yes_price*100).toFixed(1)}%</td>
+      <td class="confidence">$${(m.volume/1000).toFixed(0)}k</td>
+    </tr>`).join('');
+
+  } catch (e) {
+    document.getElementById('status-line').innerHTML = `<span style="color:var(--bad)">Error: ${e.message}</span>`;
+  }
+}
+
+refresh();
+setInterval(refresh, 15000);
+</script>
+</body>
+</html>

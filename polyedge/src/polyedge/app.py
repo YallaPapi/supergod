@@ -2,12 +2,66 @@
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import select, func, desc
+from fastapi.responses import HTMLResponse
+from sqlalchemy import select, func, desc, text
 from polyedge.db import SessionLocal
-from polyedge.models import Market, Factor, Prediction, FactorWeight
+from polyedge.models import Market, Factor, Prediction, FactorWeight, PriceSnapshot
+import importlib.resources as pkg_resources
 
 app = FastAPI(title="PolyEdge")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+
+@app.get("/", response_class=HTMLResponse)
+async def dashboard():
+    import pathlib
+    html_path = pathlib.Path(__file__).parent / "static" / "dashboard.html"
+    return HTMLResponse(html_path.read_text())
+
+
+@app.get("/api/stats")
+async def stats():
+    async with SessionLocal() as session:
+        total_markets = (await session.execute(select(func.count(Market.id)))).scalar()
+        active_markets = (await session.execute(select(func.count(Market.id)).where(Market.active == True))).scalar()
+        total_factors = (await session.execute(select(func.count(Factor.id)))).scalar()
+        total_predictions = (await session.execute(select(func.count(Prediction.id)))).scalar()
+        correct = (await session.execute(select(func.count(Prediction.id)).where(Prediction.correct == True))).scalar()
+        scored = (await session.execute(select(func.count(Prediction.id)).where(Prediction.correct != None))).scalar()
+
+        # Factor breakdown by source
+        source_counts = (await session.execute(
+            select(Factor.source, func.count(Factor.id)).group_by(Factor.source)
+        )).all()
+
+        # Factor breakdown by category (top 15)
+        cat_counts = (await session.execute(
+            select(Factor.category, func.count(Factor.id))
+            .group_by(Factor.category).order_by(desc(func.count(Factor.id))).limit(15)
+        )).all()
+
+        # Recent activity timestamps
+        last_factor = (await session.execute(
+            select(Factor.timestamp).order_by(desc(Factor.timestamp)).limit(1)
+        )).scalar()
+        last_prediction = (await session.execute(
+            select(Prediction.created_at).order_by(desc(Prediction.created_at)).limit(1)
+        )).scalar()
+        last_poll = (await session.execute(
+            select(Market.updated_at).order_by(desc(Market.updated_at)).limit(1)
+        )).scalar()
+
+        return {
+            "total_markets": total_markets, "active_markets": active_markets,
+            "total_factors": total_factors, "total_predictions": total_predictions,
+            "scored_predictions": scored, "correct_predictions": correct,
+            "overall_hit_rate": round(correct / scored, 4) if scored else None,
+            "factors_by_source": {row[0]: row[1] for row in source_counts},
+            "factors_by_category": {row[0]: row[1] for row in cat_counts},
+            "last_factor_at": str(last_factor) if last_factor else None,
+            "last_prediction_at": str(last_prediction) if last_prediction else None,
+            "last_poll_at": str(last_poll) if last_poll else None,
+        }
 
 
 @app.get("/api/markets")
@@ -39,6 +93,15 @@ async def get_market(market_id: str):
         }
 
 
+@app.get("/api/factors/recent")
+async def recent_factors(limit: int = 50):
+    async with SessionLocal() as session:
+        factors = (await session.execute(
+            select(Factor).order_by(desc(Factor.timestamp)).limit(limit)
+        )).scalars().all()
+        return [_factor_dict(f) for f in factors]
+
+
 @app.get("/api/factors/weights")
 async def factor_weights():
     async with SessionLocal() as session:
@@ -49,21 +112,38 @@ async def factor_weights():
                  "correct": w.correct_predictions, "weight": w.weight} for w in weights]
 
 
-@app.get("/api/stats")
-async def stats():
+@app.get("/api/predictions/recent")
+async def recent_predictions(limit: int = 50):
     async with SessionLocal() as session:
-        total_markets = (await session.execute(select(func.count(Market.id)))).scalar()
-        active_markets = (await session.execute(select(func.count(Market.id)).where(Market.active == True))).scalar()
-        total_factors = (await session.execute(select(func.count(Factor.id)))).scalar()
-        total_predictions = (await session.execute(select(func.count(Prediction.id)))).scalar()
-        correct = (await session.execute(select(func.count(Prediction.id)).where(Prediction.correct == True))).scalar()
-        scored = (await session.execute(select(func.count(Prediction.id)).where(Prediction.correct != None))).scalar()
-        return {
-            "total_markets": total_markets, "active_markets": active_markets,
-            "total_factors": total_factors, "total_predictions": total_predictions,
-            "scored_predictions": scored, "correct_predictions": correct,
-            "overall_hit_rate": round(correct / scored, 4) if scored else None,
-        }
+        preds = (await session.execute(
+            select(Prediction).order_by(desc(Prediction.created_at)).limit(limit)
+        )).scalars().all()
+        result = []
+        for p in preds:
+            market = await session.get(Market, p.market_id)
+            result.append({
+                **_pred_dict(p),
+                "market_question": market.question if market else "?",
+                "current_yes_price": market.yes_price if market else None,
+            })
+        return result
+
+
+@app.get("/api/predictions/scored")
+async def scored_predictions(limit: int = 50):
+    async with SessionLocal() as session:
+        preds = (await session.execute(
+            select(Prediction).where(Prediction.correct != None)
+            .order_by(desc(Prediction.resolved_at)).limit(limit)
+        )).scalars().all()
+        result = []
+        for p in preds:
+            market = await session.get(Market, p.market_id)
+            result.append({
+                **_pred_dict(p),
+                "market_question": market.question if market else "?",
+            })
+        return result
 
 
 def _market_dict(m):
@@ -73,10 +153,14 @@ def _market_dict(m):
 
 
 def _factor_dict(f):
-    return {"id": f.id, "category": f.category, "name": f.name, "value": f.value,
-            "source": f.source, "confidence": f.confidence, "timestamp": str(f.timestamp)}
+    return {"id": f.id, "category": f.category, "subcategory": f.subcategory,
+            "name": f.name, "value": f.value, "source": f.source,
+            "confidence": f.confidence, "timestamp": str(f.timestamp),
+            "market_id": f.market_id}
 
 
 def _pred_dict(p):
     return {"id": p.id, "predicted_outcome": p.predicted_outcome, "confidence": p.confidence,
-            "entry_yes_price": p.entry_yes_price, "correct": p.correct, "created_at": str(p.created_at)}
+            "entry_yes_price": p.entry_yes_price, "correct": p.correct,
+            "created_at": str(p.created_at), "market_id": p.market_id,
+            "factor_categories": p.factor_categories}

@@ -15,3 +15,15 @@ def test_factor_weights_endpoint_registered():
 
 def test_get_market_endpoint_registered():
     assert app.url_path_for("get_market", market_id="test") == "/api/markets/test"
+
+
+def test_dashboard_endpoint_registered():
+    assert app.url_path_for("dashboard") == "/"
+
+
+def test_recent_factors_endpoint_registered():
+    assert app.url_path_for("recent_factors") == "/api/factors/recent"
+
+
+def test_recent_predictions_endpoint_registered():
+    assert app.url_path_for("recent_predictions") == "/api/predictions/recent"
