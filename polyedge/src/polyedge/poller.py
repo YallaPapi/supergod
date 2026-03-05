@@ -62,7 +62,7 @@ class PolymarketPoller:
         resp.raise_for_status()
         return resp.json()
 
-    async def _poll_batch(self, **params) -> int:
+    async def _poll_batch(self, max_results: int = 0, **params) -> int:
         """Poll markets with given filter params."""
         offset = 0
         total = 0
@@ -91,13 +91,15 @@ class PolymarketPoller:
             offset += 100
             if len(raw_markets) < 100:
                 break
+            if max_results and total >= max_results:
+                break
         return total
 
     async def poll_all(self) -> int:
         # Only poll active (non-closed) markets — ~8k instead of 326k
         active = await self._poll_batch(closed="false")
         # Also poll recently closed to catch resolutions
-        closed = await self._poll_batch(closed="true", order="updatedAt", ascending="false", limit=500)
+        closed = await self._poll_batch(closed="true", order="updatedAt", ascending="false", max_results=500)
         total = active + closed
         log.info("Polled %d markets (%d active, %d recently closed)", total, active, closed)
         return total
