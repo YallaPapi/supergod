@@ -1,0 +1,15 @@
+[Unit]
+Description=PolyEdge API
+After=postgresql.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/polyedge
+ExecStart=/opt/polyedge/.venv/bin/polyedge serve
+Restart=always
+RestartSec=10
+Environment=POLYEDGE_DATABASE_URL=postgresql+asyncpg://polyedge:polyedge@localhost:5432/polyedge
+
+[Install]
+WantedBy=multi-user.target

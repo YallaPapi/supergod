@@ -1,0 +1,17 @@
+[Unit]
+Description=PolyEdge Scheduler
+After=postgresql.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/polyedge
+ExecStart=/opt/polyedge/.venv/bin/polyedge run
+Restart=always
+RestartSec=10
+Environment=POLYEDGE_DATABASE_URL=postgresql+asyncpg://polyedge:polyedge@localhost:5432/polyedge
+Environment=POLYEDGE_PERPLEXITY_API_KEY=
+Environment=POLYEDGE_GROK_API_KEY=
+
+[Install]
+WantedBy=multi-user.target
