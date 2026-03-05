@@ -1,3 +1,4 @@
+import json
 import logging
 from datetime import datetime
 import httpx
@@ -10,7 +11,14 @@ GAMMA_URL = "https://gamma-api.polymarket.com"
 
 
 def parse_market(raw: dict) -> dict:
-    prices = raw.get("outcomePrices", ["0.5", "0.5"])
+    prices_raw = raw.get("outcomePrices", '["0.5", "0.5"]')
+    if isinstance(prices_raw, str):
+        try:
+            prices = json.loads(prices_raw)
+        except (json.JSONDecodeError, TypeError):
+            prices = ["0.5", "0.5"]
+    else:
+        prices = prices_raw
     yes_price = float(prices[0]) if prices else 0.5
     no_price = float(prices[1]) if len(prices) > 1 else 1.0 - yes_price
     end_raw = raw.get("endDate")

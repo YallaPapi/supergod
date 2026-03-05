@@ -44,3 +44,11 @@ def test_parse_market_no_end_date():
     del raw["endDate"]
     m = parse_market(raw)
     assert m["end_date"] is None
+
+
+def test_parse_market_json_string_prices():
+    """Gamma API returns outcomePrices as a JSON string, not a list."""
+    raw = {**SAMPLE_MARKET, "outcomePrices": '["0.72", "0.28"]'}
+    m = parse_market(raw)
+    assert m["yes_price"] == 0.72
+    assert m["no_price"] == 0.28
