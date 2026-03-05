@@ -2,7 +2,7 @@
 import json
 import logging
 from datetime import datetime
-from sqlalchemy import select
+from sqlalchemy import select, and_
 from polyedge.db import SessionLocal
 from polyedge.models import Prediction, Market, FactorWeight
 
@@ -27,24 +27,49 @@ def _hit_rate_to_weight(hit_rate: float, sample_size: int) -> float:
     return 1.0 + (hit_rate - 0.5) * 4
 
 
+def _infer_resolution(market) -> str | None:
+    """Infer resolution from market data even if not explicitly marked."""
+    if market.resolution:
+        return market.resolution
+    # Price near 0/1 means effectively resolved
+    if market.yes_price >= 0.95:
+        return "YES"
+    if market.no_price >= 0.95:
+        return "NO"
+    # Past end date with decisive price
+    if market.end_date and market.end_date < datetime.utcnow():
+        if market.yes_price >= 0.8:
+            return "YES"
+        if market.no_price >= 0.8:
+            return "NO"
+    return None
+
+
 async def score_resolved_markets():
     async with SessionLocal() as session:
+        # Score explicitly resolved markets
         stmt = (
             select(Prediction, Market)
             .join(Market, Prediction.market_id == Market.id)
-            .where(Market.resolved == True)
             .where(Prediction.correct == None)
         )
         results = (await session.execute(stmt)).all()
         if not results:
             return
+        scored = 0
         for pred, market in results:
-            if not market.resolution:
+            resolution = _infer_resolution(market)
+            if not resolution:
                 continue
-            pred.correct = pred.predicted_outcome == market.resolution
+            pred.correct = pred.predicted_outcome == resolution
             pred.resolved_at = datetime.utcnow()
+            # Also set resolution on market if missing
+            if not market.resolution:
+                market.resolution = resolution
+            scored += 1
         await session.commit()
-        log.info("Scored %d predictions", len(results))
+        if scored:
+            log.info("Scored %d predictions", scored)
     await recalculate_weights()
 
 
