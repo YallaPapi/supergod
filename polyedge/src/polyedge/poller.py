@@ -56,16 +56,18 @@ class PolymarketPoller:
     def __init__(self):
         self.client = httpx.AsyncClient(base_url=GAMMA_URL, timeout=30)
 
-    async def fetch_markets(self, limit: int = 100, offset: int = 0) -> list[dict]:
-        resp = await self.client.get("/markets", params={"limit": limit, "offset": offset})
+    async def fetch_markets(self, limit: int = 100, offset: int = 0, **params) -> list[dict]:
+        params.update({"limit": limit, "offset": offset})
+        resp = await self.client.get("/markets", params=params)
         resp.raise_for_status()
         return resp.json()
 
-    async def poll_all(self) -> int:
+    async def _poll_batch(self, **params) -> int:
+        """Poll markets with given filter params."""
         offset = 0
         total = 0
         while True:
-            raw_markets = await self.fetch_markets(limit=100, offset=offset)
+            raw_markets = await self.fetch_markets(limit=100, offset=offset, **params)
             if not raw_markets:
                 break
             async with SessionLocal() as session:
@@ -89,7 +91,15 @@ class PolymarketPoller:
             offset += 100
             if len(raw_markets) < 100:
                 break
-        log.info("Polled %d markets", total)
+        return total
+
+    async def poll_all(self) -> int:
+        # Only poll active (non-closed) markets — ~8k instead of 326k
+        active = await self._poll_batch(closed="false")
+        # Also poll recently closed to catch resolutions
+        closed = await self._poll_batch(closed="true", order="updatedAt", ascending="false", limit=500)
+        total = active + closed
+        log.info("Polled %d markets (%d active, %d recently closed)", total, active, closed)
         return total
 
     async def close(self):
