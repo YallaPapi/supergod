@@ -1,5 +1,5 @@
-from datetime import datetime
-from sqlalchemy import String, Float, DateTime, Boolean, Text, Integer, ForeignKey, Index
+from datetime import date, datetime
+from sqlalchemy import String, Float, DateTime, Date, Boolean, Text, Integer, ForeignKey, Index
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 import uuid
 
@@ -73,4 +73,79 @@ class FactorWeight(Base):
     correct_predictions: Mapped[int] = mapped_column(Integer, default=0)
     hit_rate: Mapped[float] = mapped_column(Float, default=0.5)
     weight: Mapped[float] = mapped_column(Float, default=1.0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class DailyFeature(Base):
+    """One numeric feature for one date. This is the feature matrix."""
+    __tablename__ = "daily_features"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    date: Mapped[date] = mapped_column(Date, index=True)
+    source: Mapped[str] = mapped_column(String(50), index=True)
+    category: Mapped[str] = mapped_column(String(50), index=True)
+    name: Mapped[str] = mapped_column(String(200), index=True)
+    value: Mapped[float] = mapped_column(Float)
+    __table_args__ = (
+        Index("ix_feat_date_name", "date", "name", unique=True),
+    )
+
+
+class MarketPriceHistory(Base):
+    """Historical CLOB trading prices for a market."""
+    __tablename__ = "market_price_history"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    market_id: Mapped[str] = mapped_column(String, ForeignKey("markets.id"), index=True)
+    timestamp: Mapped[datetime] = mapped_column(DateTime, index=True)
+    yes_price: Mapped[float] = mapped_column(Float)
+    __table_args__ = (
+        Index("ix_mph_market_ts", "market_id", "timestamp"),
+    )
+
+
+class TradingRule(Base):
+    """A discovered correlation rule."""
+    __tablename__ = "trading_rules"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(200))
+    rule_type: Mapped[str] = mapped_column(String(50))
+    conditions_json: Mapped[str] = mapped_column(Text)
+    predicted_side: Mapped[str] = mapped_column(String(3))
+    win_rate: Mapped[float] = mapped_column(Float)
+    sample_size: Mapped[int] = mapped_column(Integer)
+    breakeven_price: Mapped[float] = mapped_column(Float)
+    avg_roi: Mapped[float] = mapped_column(Float, default=0)
+    market_filter: Mapped[str] = mapped_column(Text, default="")
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class PaperTrade(Base):
+    """Paper trade tracking -- both YES and NO sides."""
+    __tablename__ = "paper_trades"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    market_id: Mapped[str] = mapped_column(String, ForeignKey("markets.id"), index=True)
+    rule_id: Mapped[int] = mapped_column(Integer, ForeignKey("trading_rules.id"), index=True)
+    side: Mapped[str] = mapped_column(String(3))
+    entry_price: Mapped[float] = mapped_column(Float)
+    edge: Mapped[float] = mapped_column(Float)
+    bet_size: Mapped[float] = mapped_column(Float, default=1.0)
+    resolved: Mapped[bool] = mapped_column(Boolean, default=False)
+    won: Mapped[bool | None] = mapped_column(Boolean)
+    pnl: Mapped[float | None] = mapped_column(Float)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
+class NgramStat(Base):
+    """Win rate stats for word phrases in market questions."""
+    __tablename__ = "ngram_stats"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ngram: Mapped[str] = mapped_column(String(200), unique=True, index=True)
+    n: Mapped[int] = mapped_column(Integer)
+    total_markets: Mapped[int] = mapped_column(Integer)
+    yes_count: Mapped[int] = mapped_column(Integer)
+    no_count: Mapped[int] = mapped_column(Integer)
+    yes_rate: Mapped[float] = mapped_column(Float)
+    no_rate: Mapped[float] = mapped_column(Float)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
