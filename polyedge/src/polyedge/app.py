@@ -6,6 +6,7 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy import select, func, desc, text
 from polyedge.db import SessionLocal
 from polyedge.models import Market, Factor, Prediction, FactorWeight, PriceSnapshot
+import json
 import importlib.resources as pkg_resources
 
 app = FastAPI(title="PolyEdge")
@@ -142,6 +143,102 @@ async def scored_predictions(limit: int = 50):
             result.append({
                 **_pred_dict(p),
                 "market_question": market.question if market else "?",
+            })
+        return result
+
+
+@app.get("/api/predictions/{prediction_id}/analysis")
+async def prediction_analysis(prediction_id: str):
+    """Full post-resolution factor breakdown for a single prediction."""
+    async with SessionLocal() as session:
+        pred = await session.get(Prediction, prediction_id)
+        if not pred:
+            return {"error": "not found"}
+        market = await session.get(Market, pred.market_id)
+
+        # Load the actual factors that were used
+        factor_ids = json.loads(pred.factor_ids) if pred.factor_ids else []
+        factors = []
+        if factor_ids:
+            factor_rows = (await session.execute(
+                select(Factor).where(Factor.id.in_(factor_ids[:100]))
+            )).scalars().all()
+            factors = [_factor_dict(f) for f in factor_rows]
+
+        # Compute per-factor vote direction (same logic as predictor)
+        yes_signals = ["yes", "bullish", "positive", "up", "likely", "probable", "true", "support"]
+        no_signals = ["no", "bearish", "negative", "down", "unlikely", "improbable", "false", "oppose"]
+        for f in factors:
+            val = (f.get("value") or "").lower()
+            if any(s in val for s in yes_signals):
+                f["vote"] = "YES"
+            elif any(s in val for s in no_signals):
+                f["vote"] = "NO"
+            else:
+                f["vote"] = "neutral"
+
+        # Category-level summary
+        cats = json.loads(pred.factor_categories) if pred.factor_categories else []
+        weights = (await session.execute(select(FactorWeight))).scalars().all()
+        weight_map = {w.category: {"weight": w.weight, "hit_rate": w.hit_rate, "total": w.total_predictions} for w in weights}
+        category_breakdown = []
+        for cat in cats:
+            cat_factors = [f for f in factors if f.get("category") == cat]
+            w = weight_map.get(cat, {})
+            category_breakdown.append({
+                "category": cat,
+                "factor_count": len(cat_factors),
+                "weight": w.get("weight", 1.0),
+                "hit_rate": w.get("hit_rate"),
+                "total_scored": w.get("total", 0),
+                "factors": cat_factors,
+            })
+
+        return {
+            "prediction": {**_pred_dict(pred), "market_question": market.question if market else "?",
+                           "market_resolution": market.resolution if market else None,
+                           "current_yes_price": market.yes_price if market else None},
+            "total_factors_used": len(factor_ids),
+            "factors_found": len(factors),
+            "category_breakdown": category_breakdown,
+        }
+
+
+@app.get("/api/analysis/scored")
+async def scored_analysis(limit: int = 20):
+    """Scored predictions with inline factor breakdown — for the dashboard."""
+    async with SessionLocal() as session:
+        preds = (await session.execute(
+            select(Prediction).where(Prediction.correct != None)
+            .order_by(desc(Prediction.resolved_at)).limit(limit)
+        )).scalars().all()
+        if not preds:
+            return []
+
+        # Batch-load all factor IDs
+        all_fids = []
+        for p in preds:
+            all_fids.extend(json.loads(p.factor_ids) if p.factor_ids else [])
+        factor_map = {}
+        if all_fids:
+            rows = (await session.execute(
+                select(Factor).where(Factor.id.in_(list(set(all_fids))[:500]))
+            )).scalars().all()
+            factor_map = {f.id: _factor_dict(f) for f in rows}
+
+        result = []
+        for p in preds:
+            market = await session.get(Market, p.market_id)
+            fids = json.loads(p.factor_ids) if p.factor_ids else []
+            cats = json.loads(p.factor_categories) if p.factor_categories else []
+            factors = [factor_map[fid] for fid in fids if fid in factor_map]
+            result.append({
+                **_pred_dict(p),
+                "market_question": market.question if market else "?",
+                "market_resolution": market.resolution if market else None,
+                "factors_used": len(fids),
+                "categories": cats,
+                "top_factors": factors[:5],  # first 5 for dashboard brevity
             })
         return result
 

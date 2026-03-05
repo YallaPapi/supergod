@@ -105,6 +105,12 @@
     </div>
   </div>
 
+  <!-- Post-Resolution Analysis -->
+  <div class="section card">
+    <div class="section-title">Post-Resolution Analysis (scored predictions with factor breakdown)</div>
+    <div id="analysis-wrap"><p style="color:var(--muted);font-size:0.85rem">No scored predictions yet. Analysis appears after markets resolve.</p></div>
+  </div>
+
   <!-- Top Markets -->
   <div class="section card">
     <div class="section-title">Top Active Markets (by volume)</div>
@@ -163,12 +169,13 @@ const catColors = {};
 
 async function refresh() {
   try {
-    const [stats, factors, preds, markets, weights] = await Promise.all([
+    const [stats, factors, preds, markets, weights, scored] = await Promise.all([
       fetch(API + '/api/stats').then(r => r.json()),
       fetch(API + '/api/factors/recent?limit=30').then(r => r.json()),
       fetch(API + '/api/predictions/recent?limit=30').then(r => r.json()),
       fetch(API + '/api/markets?limit=20').then(r => r.json()),
       fetch(API + '/api/factors/weights').then(r => r.json()),
+      fetch(API + '/api/analysis/scored?limit=20').then(r => r.json()),
     ]);
 
     // Status line
@@ -228,6 +235,45 @@ async function refresh() {
       <td class="confidence">${(m.yes_price*100).toFixed(1)}%</td>
       <td class="confidence">$${(m.volume/1000).toFixed(0)}k</td>
     </tr>`).join('');
+
+    // Post-resolution analysis
+    if (scored && scored.length) {
+      document.getElementById('analysis-wrap').innerHTML = scored.map(s => {
+        const icon = s.correct ? '<span style="color:var(--ok)">&#10003;</span>' : '<span style="color:var(--bad)">&#10007;</span>';
+        const cats = (s.categories || []).map(c => `<span class="tag" style="background:rgba(95,168,255,0.1);color:var(--busy)">${c}</span>`).join(' ');
+        const factorRows = (s.top_factors || []).map(f => {
+          const vote = (f.vote === 'YES') ? '<span style="color:var(--ok)">YES</span>'
+                     : (f.vote === 'NO') ? '<span style="color:var(--bad)">NO</span>'
+                     : '<span style="color:var(--muted)">~</span>';
+          return `<tr>
+            <td>${sourceTag(f.source)}</td>
+            <td><span class="tag" style="background:rgba(95,168,255,0.1);color:var(--busy)">${f.category}</span></td>
+            <td>${f.name}</td>
+            <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${f.value}">${f.value}</td>
+            <td>${vote}</td>
+            <td class="confidence">${f.confidence?.toFixed(2) ?? '—'}</td>
+          </tr>`;
+        }).join('');
+        return `<div style="border:1px solid var(--line);border-radius:8px;padding:12px;margin-bottom:12px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+            <div>
+              ${icon} <strong>${s.market_question}</strong>
+              <span class="timestamp" style="margin-left:8px">${ago(s.created_at)}</span>
+            </div>
+            <div>
+              Predicted: ${predTag(s.predicted_outcome)} at ${(s.confidence*100).toFixed(1)}%
+              &nbsp;|&nbsp; Resolved: <strong>${s.market_resolution || '?'}</strong>
+              &nbsp;|&nbsp; ${s.correct ? '<span style="color:var(--ok)">CORRECT</span>' : '<span style="color:var(--bad)">WRONG</span>'}
+            </div>
+          </div>
+          <div style="margin-bottom:6px;font-size:0.8rem;color:var(--muted)">${s.factors_used} factors across: ${cats || '<span style="color:var(--muted)">no factors (baseline only)</span>'}</div>
+          ${factorRows ? `<table style="font-size:0.78rem">
+            <thead><tr><th>Source</th><th>Category</th><th>Factor</th><th>Value</th><th>Vote</th><th>Conf</th></tr></thead>
+            <tbody>${factorRows}</tbody>
+          </table>` : '<div style="font-size:0.8rem;color:var(--muted)">No factors — prediction used market price baseline only</div>'}
+        </div>`;
+      }).join('');
+    }
 
   } catch (e) {
     document.getElementById('status-line').innerHTML = `<span style="color:var(--bad)">Error: ${e.message}</span>`;
