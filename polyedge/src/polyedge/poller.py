@@ -22,7 +22,10 @@ def parse_market(raw: dict) -> dict:
     yes_price = float(prices[0]) if prices else 0.5
     no_price = float(prices[1]) if len(prices) > 1 else 1.0 - yes_price
     end_raw = raw.get("endDate")
-    end_date = datetime.fromisoformat(end_raw.replace("Z", "+00:00")) if end_raw else None
+    if end_raw:
+        end_date = datetime.fromisoformat(end_raw.replace("Z", "+00:00")).replace(tzinfo=None)
+    else:
+        end_date = None
     closed = raw.get("closed", False)
     return {
         "id": raw["id"],
