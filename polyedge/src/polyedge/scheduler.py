@@ -164,20 +164,13 @@ async def run_forever():
                 log.error("%s failed: %s", name, e, exc_info=True)
             await asyncio.sleep(interval_seconds)
 
-    async def research_then_predict():
-        await run_api_research()
-        await generate_all_predictions()
-
-    async def supergod_then_predict():
-        await run_supergod_research()
-        await generate_all_predictions()
-
     async def poll_then_score():
         await run_poller()
         await score_resolved_markets()
 
     await asyncio.gather(
         loop(poll_then_score, 300, "poller+scorer"),           # every 5 min
-        loop(research_then_predict, 1800, "api_research"),     # every 30 min
-        loop(supergod_then_predict, 1800, "supergod"),         # every 30 min
+        loop(run_api_research, 1800, "api_research"),          # every 30 min
+        loop(run_supergod_research, 1800, "supergod"),         # every 30 min
+        loop(generate_all_predictions, 3600, "predictions"),   # every 1 hour, ONCE
     )

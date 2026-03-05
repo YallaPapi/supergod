@@ -4,7 +4,7 @@ import json
 import logging
 from datetime import datetime, timedelta
 
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, func
 from polyedge.db import SessionLocal
 from polyedge.models import Market, Factor, Prediction, FactorWeight
 from polyedge.analysis.predictor import make_prediction
@@ -35,7 +35,21 @@ async def generate_all_predictions():
         global_cats = {f.category for f in global_factors}
 
         count = 0
+        skipped = 0
         for market in markets:
+            # Dedupe: skip if a prediction exists for this market in the last hour
+            existing = (await session.execute(
+                select(func.count()).select_from(Prediction).where(
+                    and_(
+                        Prediction.market_id == market.id,
+                        Prediction.created_at > datetime.utcnow() - timedelta(hours=1),
+                    )
+                )
+            )).scalar()
+            if existing > 0:
+                skipped += 1
+                continue
+
             # Market-specific factors
             market_factors = (await session.execute(
                 select(Factor).where(
@@ -65,4 +79,6 @@ async def generate_all_predictions():
             count += 1
 
         await session.commit()
+        if skipped:
+            log.info("Skipped %d markets with recent predictions", skipped)
         log.info("Generated %d predictions for %d active markets", count, len(markets))
