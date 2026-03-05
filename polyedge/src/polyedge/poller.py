@@ -27,6 +27,13 @@ def parse_market(raw: dict) -> dict:
     else:
         end_date = None
     closed = raw.get("closed", False)
+    # Detect resolution from outcome prices: [1, 0] = YES, [0, 1] = NO
+    resolution = None
+    if closed:
+        if yes_price >= 0.99:
+            resolution = "YES"
+        elif no_price >= 0.99:
+            resolution = "NO"
     return {
         "id": raw["id"],
         "question": raw.get("question", ""),
@@ -40,6 +47,7 @@ def parse_market(raw: dict) -> dict:
         "liquidity": float(raw.get("liquidity", 0)),
         "active": raw.get("active", True) and not closed,
         "resolved": closed,
+        "resolution": resolution,
         "clob_token_ids": str(raw.get("clobTokenIds", [])),
     }
 

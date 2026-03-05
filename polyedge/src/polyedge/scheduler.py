@@ -143,13 +143,12 @@ async def run_forever():
         await run_supergod_research()
         await generate_all_predictions()
 
-    async def nightly_scoring():
+    async def poll_then_score():
+        await run_poller()
         await score_resolved_markets()
-        await recalculate_weights()
 
     await asyncio.gather(
-        loop(run_poller, 300, "poller"),                       # every 5 min
+        loop(poll_then_score, 300, "poller+scorer"),           # every 5 min
         loop(research_then_predict, 1800, "api_research"),     # every 30 min
         loop(supergod_then_predict, 1800, "supergod"),         # every 30 min
-        loop(nightly_scoring, 86400, "scoring"),               # daily
     )
