@@ -1,29 +1,137 @@
-from polyedge.app import app
+"""Tests for the v3 FastAPI app endpoints."""
+from fastapi.testclient import TestClient
+from polyedge.app import app, _prediction_edge_pct, _rule_to_plain_english
 
 
 def test_stats_endpoint_registered():
     assert app.url_path_for("stats") == "/api/stats"
 
 
+def test_dashboard_endpoint_registered():
+    assert app.url_path_for("dashboard") == "/"
+
+
+def test_dashboard_summary_endpoint():
+    assert app.url_path_for("dashboard_summary") == "/api/dashboard"
+
+
+def test_pnl_endpoint():
+    assert app.url_path_for("paper_trading_pnl") == "/api/pnl"
+
+
+def test_rules_endpoint():
+    assert app.url_path_for("list_rules") == "/api/rules"
+
+
+def test_positions_endpoint():
+    assert app.url_path_for("open_positions") == "/api/positions"
+
+
+def test_features_status_endpoint():
+    assert app.url_path_for("feature_status") == "/api/features/status"
+
+
+def test_activity_endpoint():
+    assert app.url_path_for("recent_activity") == "/api/activity"
+
+
+def test_mission_control_endpoint():
+    assert app.url_path_for("mission_control") == "/api/mission-control"
+
+
+def test_ops_runtime_endpoint():
+    assert app.url_path_for("ops_runtime_status") == "/api/ops/runtime"
+
+
 def test_markets_endpoint_registered():
     assert app.url_path_for("list_markets") == "/api/markets"
+
+
+def test_market_detail_endpoint_registered():
+    assert app.url_path_for("get_market", market_id="mkt_123") == "/api/markets/mkt_123"
+
+
+def test_factors_recent_endpoint_registered():
+    assert app.url_path_for("factors_recent") == "/api/factors/recent"
+
+
+def test_predictions_recent_endpoint_registered():
+    assert app.url_path_for("predictions_recent") == "/api/predictions/recent"
+
+
+def test_analysis_scored_endpoint_registered():
+    assert app.url_path_for("analysis_scored") == "/api/analysis/scored"
 
 
 def test_factor_weights_endpoint_registered():
     assert app.url_path_for("factor_weights") == "/api/factors/weights"
 
 
-def test_get_market_endpoint_registered():
-    assert app.url_path_for("get_market", market_id="test") == "/api/markets/test"
+def test_backtest_endpoint_reads_env_path(tmp_path, monkeypatch):
+    out = tmp_path / "latest_backtest.json"
+    out.write_text('{"status":"ok","trades":7}', encoding="utf-8")
+    monkeypatch.setenv("POLYEDGE_BACKTEST_PATH", str(out))
+    client = TestClient(app)
+    resp = client.get("/api/backtest")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ok"
+    assert resp.json()["trades"] == 7
 
 
-def test_dashboard_endpoint_registered():
-    assert app.url_path_for("dashboard") == "/"
+def test_prediction_edge_pct_yes():
+    assert _prediction_edge_pct("YES", 0.70, 0.55) == 15.0
 
 
-def test_recent_factors_endpoint_registered():
-    assert app.url_path_for("recent_factors") == "/api/factors/recent"
+def test_prediction_edge_pct_no():
+    # Market no-price = 1 - yes_price = 0.45, model no-confidence = 0.60 => +15%
+    assert _prediction_edge_pct("NO", 0.60, 0.55) == 15.0
 
 
-def test_recent_predictions_endpoint_registered():
-    assert app.url_path_for("recent_predictions") == "/api/predictions/recent"
+def test_prediction_edge_pct_invalid_input():
+    assert _prediction_edge_pct("MAYBE", 0.60, 0.55) is None
+    assert _prediction_edge_pct("YES", None, 0.55) is None
+    assert _prediction_edge_pct("YES", 0.60, None) is None
+
+
+def test_human_dashboard_endpoint_registered():
+    assert app.url_path_for("human_dashboard") == "/api/human-dashboard"
+
+
+class _FakeRule:
+    def __init__(self, name, rule_type, conditions_json, predicted_side, win_rate, sample_size):
+        self.name = name
+        self.rule_type = rule_type
+        self.conditions_json = conditions_json
+        self.predicted_side = predicted_side
+        self.win_rate = win_rate
+        self.sample_size = sample_size
+        self.breakeven_price = win_rate
+
+
+def test_rule_to_plain_english_ngram():
+    r = _FakeRule("ngram:another party", "ngram", '{"ngram": "another party", "n": 2}',
+                  "NO", 1.0, 153)
+    text = _rule_to_plain_english(r)
+    assert "another party" in text
+    assert "NO" in text
+    assert "100%" in text
+    assert "153" in text
+
+
+def test_rule_to_plain_english_single_threshold():
+    r = _FakeRule("vix_high", "single_threshold",
+                  '{"feature": "vix_close", "op": ">", "value": 25}',
+                  "NO", 0.64, 120)
+    text = _rule_to_plain_english(r)
+    assert "vix close" in text
+    assert "NO" in text
+    assert "64%" in text
+
+
+def test_rule_to_plain_english_two_feature():
+    r = _FakeRule("combo", "two_feature",
+                  '{"features": [{"feature": "fred_spread", "op": ">", "value": 0.5}, {"feature": "fear_index", "op": "<", "value": 45}]}',
+                  "YES", 0.72, 85)
+    text = _rule_to_plain_english(r)
+    assert "YES" in text
+    assert "72%" in text

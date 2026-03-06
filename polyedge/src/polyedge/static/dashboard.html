@@ -3,285 +3,466 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>PolyEdge Mission Control</title>
-  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <title>PolyEdge — Trading Intelligence</title>
   <style>
     :root {
-      --bg-0: #0a1220; --bg-1: #111d34; --bg-2: #1a2c4a;
-      --fg: #eef5ff; --muted: #a9bdd8; --line: #2d4771;
-      --ok: #24d18a; --warn: #ffbc42; --bad: #ff5d73; --busy: #5fa8ff;
-      --panel: rgba(14, 26, 45, 0.86);
+      --bg-0: #0b0e14; --bg-1: #151a23; --bg-2: #1c2333;
+      --fg: #e6edf3; --muted: #8b949e; --dim: #484f58;
+      --border: #30363d; --panel: #161b22;
+      --green: #3fb950; --green-dim: #238636;
+      --red: #f85149; --red-dim: #da3633;
+      --blue: #58a6ff; --yellow: #d29922;
+      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      --mono: "Consolas", "SF Mono", "Cascadia Mono", monospace;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      color: var(--fg); font-family: "Space Grotesk", sans-serif;
-      background: linear-gradient(160deg, var(--bg-0), var(--bg-1) 40%, var(--bg-2));
-      min-height: 100vh; padding: 20px;
+    body { background: var(--bg-0); color: var(--fg); font-family: var(--sans); min-height: 100vh; padding: 20px 24px; }
+
+    .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+    .header h1 { font-size: 1.4rem; font-weight: 600; }
+    .header h1 span { color: var(--blue); }
+    .header-meta { color: var(--muted); font-size: 0.8rem; font-family: var(--mono); }
+    .refresh-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--green); margin-right: 6px; }
+
+    /* Hero cards row */
+    .hero-row { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap: 12px; margin-bottom: 16px; }
+    @media (max-width: 1000px) { .hero-row { grid-template-columns: 1fr; } }
+
+    .hero-card {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+      padding: 18px 20px;
     }
-    h1 { font-size: 1.8rem; margin-bottom: 6px; }
-    h1 span { color: var(--busy); }
-    .subtitle { color: var(--muted); font-size: 0.9rem; margin-bottom: 20px; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 20px; }
-    .card {
-      background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
-      padding: 16px; backdrop-filter: blur(8px);
+    .hero-card h3 { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.8px; color: var(--muted); margin-bottom: 8px; }
+    .hero-action { font-size: 1.5rem; font-weight: 700; margin-bottom: 6px; }
+    .hero-action.buy-yes { color: var(--green); }
+    .hero-action.buy-no { color: var(--red); }
+    .hero-action.wait { color: var(--yellow); }
+    .hero-detail { font-size: 0.85rem; color: var(--muted); line-height: 1.5; }
+    .hero-detail strong { color: var(--fg); }
+    .hero-reasons { list-style: disc; padding-left: 18px; margin-top: 6px; font-size: 0.82rem; color: var(--muted); line-height: 1.5; }
+
+    .stat-big { font-size: 1.8rem; font-weight: 700; font-family: var(--mono); }
+    .stat-big.positive { color: var(--green); }
+    .stat-big.negative { color: var(--red); }
+    .stat-big.neutral { color: var(--fg); }
+    .stat-sub { font-size: 0.82rem; color: var(--muted); margin-top: 4px; line-height: 1.4; }
+
+    /* Section panels */
+    .section { margin-bottom: 16px; }
+    .panel {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+      padding: 18px 20px; overflow: hidden;
     }
-    .card-label { color: var(--muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 1px; }
-    .card-value { font-size: 1.8rem; font-weight: 700; font-family: "JetBrains Mono", monospace; margin-top: 4px; }
-    .card-sub { color: var(--muted); font-size: 0.8rem; margin-top: 2px; }
-    .section { margin-bottom: 24px; }
-    .section-title { font-size: 1.1rem; font-weight: 600; margin-bottom: 10px; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
-    .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-    @media (max-width: 900px) { .two-col { grid-template-columns: 1fr; } }
+    .panel-title { font-size: 0.88rem; font-weight: 600; margin-bottom: 4px; }
+    .panel-explain { font-size: 0.8rem; color: var(--muted); margin-bottom: 14px; line-height: 1.4; }
+
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    @media (max-width: 900px) { .grid-2 { grid-template-columns: 1fr; } }
+
+    /* Tables */
     table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
-    th { text-align: left; color: var(--muted); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 1px; padding: 6px 8px; border-bottom: 1px solid var(--line); }
-    td { padding: 6px 8px; border-bottom: 1px solid rgba(45,71,113,0.3); vertical-align: top; }
-    tr:hover { background: rgba(95,168,255,0.05); }
-    .tag {
-      display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.7rem;
-      font-family: "JetBrains Mono", monospace; font-weight: 600;
-    }
-    .tag-grok { background: rgba(255,188,66,0.2); color: var(--warn); }
-    .tag-perplexity { background: rgba(95,168,255,0.2); color: var(--busy); }
-    .tag-codex { background: rgba(36,209,138,0.2); color: var(--ok); }
-    .tag-yes { background: rgba(36,209,138,0.2); color: var(--ok); }
-    .tag-no { background: rgba(255,93,115,0.2); color: var(--bad); }
-    .bar-row { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
-    .bar-label { width: 100px; font-size: 0.75rem; color: var(--muted); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .bar-track { flex: 1; height: 16px; background: rgba(45,71,113,0.3); border-radius: 3px; overflow: hidden; }
-    .bar-fill { height: 100%; border-radius: 3px; transition: width 0.5s; }
-    .bar-count { width: 40px; font-size: 0.75rem; font-family: "JetBrains Mono", monospace; }
-    .pulse { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--ok); animation: pulse 2s infinite; margin-right: 6px; }
-    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
-    .timestamp { color: var(--muted); font-size: 0.7rem; font-family: "JetBrains Mono", monospace; }
-    .q-text { max-width: 350px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .confidence { font-family: "JetBrains Mono", monospace; font-size: 0.8rem; }
-    #status-line { color: var(--muted); font-size: 0.75rem; margin-bottom: 16px; }
+    th { text-align: left; padding: 8px 10px; color: var(--muted); font-weight: 600; border-bottom: 1px solid var(--border); font-size: 0.72rem; text-transform: uppercase; }
+    td { padding: 8px 10px; border-bottom: 1px solid var(--bg-2); vertical-align: top; line-height: 1.4; }
+    tr:hover { background: var(--bg-2); }
+    .col-action { font-weight: 700; white-space: nowrap; }
+    .col-action.yes { color: var(--green); }
+    .col-action.no { color: var(--red); }
+    .col-edge { font-family: var(--mono); font-weight: 600; color: var(--green); }
+    .col-win { font-family: var(--mono); }
+    .col-win.high { color: var(--green); }
+    .col-win.mid { color: var(--yellow); }
+    .col-win.low { color: var(--red); }
+    .col-why { color: var(--muted); font-size: 0.78rem; }
+    .col-pnl { font-family: var(--mono); font-weight: 600; }
+    .col-pnl.win { color: var(--green); }
+    .col-pnl.loss { color: var(--red); }
+
+    .empty-msg { color: var(--dim); font-style: italic; padding: 24px 0; text-align: center; font-size: 0.88rem; line-height: 1.5; }
+
+    /* Tags */
+    .tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.72rem; font-weight: 600; }
+    .tag.green { background: rgba(63,185,80,0.15); color: var(--green); }
+    .tag.yellow { background: rgba(210,153,34,0.15); color: var(--yellow); }
+    .tag.red { background: rgba(248,81,73,0.15); color: var(--red); }
+    .tag.blue { background: rgba(88,166,255,0.15); color: var(--blue); }
+
+    /* System health */
+    .health-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; }
+    .health-item { background: var(--bg-2); border-radius: 6px; padding: 12px; font-size: 0.82rem; }
+    .health-label { color: var(--muted); font-size: 0.72rem; text-transform: uppercase; margin-bottom: 4px; }
+    .health-value { font-weight: 600; }
+    .health-value.ok { color: var(--green); }
+    .health-value.warn { color: var(--yellow); }
+    .health-value.bad { color: var(--red); }
+
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: var(--bg-1); }
+    ::-webkit-scrollbar-thumb { background: var(--dim); border-radius: 3px; }
   </style>
 </head>
 <body>
-  <h1><span>PolyEdge</span> Mission Control</h1>
-  <div class="subtitle">Polymarket Prediction Engine &mdash; Research &bull; Predict &bull; Score</div>
-  <div id="status-line"><span class="pulse"></span>Loading...</div>
 
-  <!-- Stats Cards -->
-  <div class="grid" id="stats-grid"></div>
+<div class="header">
+  <h1>Poly<span>Edge</span> — Trading Intelligence</h1>
+  <div class="header-meta"><span class="refresh-dot" id="refreshDot"></span>Updated: <span id="lastUpdate">--</span></div>
+</div>
 
-  <!-- Factor Breakdown + Weights -->
-  <div class="two-col">
-    <div class="section card">
-      <div class="section-title">Factor Sources</div>
-      <div id="source-bars"></div>
-      <div style="margin-top:16px">
-        <div class="section-title">Factor Categories (top 15)</div>
-        <div id="cat-bars"></div>
-      </div>
-    </div>
-    <div class="section card">
-      <div class="section-title">Category Performance</div>
-      <div id="weights-table-wrap"><p style="color:var(--muted);font-size:0.85rem">No scored predictions yet. Weights appear after markets resolve.</p></div>
-    </div>
+<!-- HERO CARDS -->
+<div class="hero-row" id="heroRow">
+  <!-- Action card -->
+  <div class="hero-card" id="actionCard">
+    <h3>Best Opportunity Right Now</h3>
+    <div class="hero-action wait" id="actionText">Loading...</div>
+    <div class="hero-detail" id="actionDetail"></div>
+    <ul class="hero-reasons" id="actionReasons"></ul>
   </div>
+  <!-- Hit rate -->
+  <div class="hero-card" id="hitRateCard">
+    <h3>How Accurate Are We?</h3>
+    <div class="stat-big neutral" id="hitRateValue">--</div>
+    <div class="stat-sub" id="hitRateDetail">Loading...</div>
+  </div>
+  <!-- Data freshness -->
+  <div class="hero-card" id="freshnessCard">
+    <h3>Data Status</h3>
+    <div id="freshnessTag"></div>
+    <div class="stat-sub" id="freshnessDetail" style="margin-top: 8px;">Loading...</div>
+  </div>
+  <!-- Paper trades -->
+  <div class="hero-card" id="paperCard">
+    <h3>Paper Trading</h3>
+    <div class="stat-big neutral" id="paperValue">--</div>
+    <div class="stat-sub" id="paperDetail">Loading...</div>
+  </div>
+</div>
 
-  <!-- Recent Factors -->
-  <div class="section card">
-    <div class="section-title">Recent Research Factors</div>
-    <div style="overflow-x:auto">
-      <table id="factors-table">
-        <thead><tr><th>Time</th><th>Source</th><th>Category</th><th>Name</th><th>Value</th><th>Confidence</th></tr></thead>
-        <tbody></tbody>
+<!-- OPPORTUNITIES TABLE -->
+<div class="section">
+  <div class="panel">
+    <div class="panel-title">Trade Opportunities</div>
+    <div class="panel-explain">Markets where our rules see an edge vs the current market price. "Edge" means we think the true probability differs from what the market is pricing.</div>
+    <div style="overflow-x:auto; max-height: 400px; overflow-y: auto;">
+      <table id="opportunitiesTable">
+        <thead><tr>
+          <th style="width:40%">Market Question</th>
+          <th>Action</th>
+          <th>Edge</th>
+          <th>Confidence</th>
+          <th style="width:30%">Why (rules that agree)</th>
+        </tr></thead>
+        <tbody><tr><td colspan="5" class="empty-msg">Loading...</td></tr></tbody>
       </table>
     </div>
   </div>
+</div>
 
-  <!-- Recent Predictions -->
-  <div class="section card">
-    <div class="section-title">Recent Predictions</div>
-    <div style="overflow-x:auto">
-      <table id="preds-table">
-        <thead><tr><th>Time</th><th>Market</th><th>Prediction</th><th>Confidence</th><th>Entry Price</th><th>Result</th></tr></thead>
-        <tbody></tbody>
+<!-- RULES + PAPER TRADES -->
+<div class="grid-2 section">
+  <!-- Rules -->
+  <div class="panel">
+    <div class="panel-title">Strongest Rules</div>
+    <div class="panel-explain">Patterns we've discovered that predict how markets will resolve. Higher win rate + more tests = more reliable.</div>
+    <div style="overflow-x:auto; max-height: 420px; overflow-y: auto;">
+      <table id="rulesTable">
+        <thead><tr>
+          <th style="width:55%">What the rule says (plain English)</th>
+          <th>Predicts</th>
+          <th>Win Rate</th>
+          <th>Tested</th>
+        </tr></thead>
+        <tbody><tr><td colspan="4" class="empty-msg">Loading...</td></tr></tbody>
       </table>
     </div>
   </div>
-
-  <!-- Post-Resolution Analysis -->
-  <div class="section card">
-    <div class="section-title">Post-Resolution Analysis (scored predictions with factor breakdown)</div>
-    <div id="analysis-wrap"><p style="color:var(--muted);font-size:0.85rem">No scored predictions yet. Analysis appears after markets resolve.</p></div>
-  </div>
-
-  <!-- Top Markets -->
-  <div class="section card">
-    <div class="section-title">Top Active Markets (by volume)</div>
-    <div style="overflow-x:auto">
-      <table id="markets-table">
-        <thead><tr><th>Market</th><th>Category</th><th>YES Price</th><th>Volume</th></tr></thead>
-        <tbody></tbody>
-      </table>
+  <!-- Paper trades -->
+  <div class="panel">
+    <div class="panel-title">Paper Trade Ledger</div>
+    <div class="panel-explain">Simulated trades using fake money to test if our rules actually make a profit before risking real money.</div>
+    <div id="paperTradesContent">
+      <div class="empty-msg">Loading...</div>
     </div>
   </div>
+</div>
+
+<!-- SYSTEM HEALTH -->
+<div class="section">
+  <div class="panel">
+    <div class="panel-title">System Health</div>
+    <div class="panel-explain">Is everything running? Heavy compute must be on the Windows server. Research agents (Grok, Perplexity) must be active.</div>
+    <div class="health-grid" id="healthGrid">
+      <div class="health-item"><div class="health-label">Loading...</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- COUNTS -->
+<div class="section">
+  <div class="panel" style="padding: 12px 20px;">
+    <div style="display: flex; gap: 24px; flex-wrap: wrap; font-size: 0.8rem; color: var(--muted);">
+      <span>Markets: <strong id="cntMarkets" style="color:var(--fg)">--</strong></span>
+      <span>Active: <strong id="cntActive" style="color:var(--fg)">--</strong></span>
+      <span>Trading Rules: <strong id="cntRules" style="color:var(--fg)">--</strong></span>
+      <span>Ngram Patterns: <strong id="cntNgrams" style="color:var(--fg)">--</strong></span>
+      <span>Research Factors: <strong id="cntFactors" style="color:var(--fg)">--</strong></span>
+      <span>Features Today: <strong id="cntFeatures" style="color:var(--fg)">--</strong></span>
+    </div>
+  </div>
+</div>
 
 <script>
-const API = '';
-let refreshCount = 0;
+(function() {
+  function $(id) { return document.getElementById(id); }
+  function esc(s) {
+    if (!s) return '';
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+  }
+  function num(n) { return n != null ? Number(n).toLocaleString() : '--'; }
 
-function ago(ts) {
-  if (!ts || ts === 'None') return '—';
-  const d = new Date(ts);
-  const s = Math.floor((Date.now() - d.getTime()) / 1000);
-  if (s < 60) return s + 's ago';
-  if (s < 3600) return Math.floor(s/60) + 'm ago';
-  if (s < 86400) return Math.floor(s/3600) + 'h ago';
-  return Math.floor(s/86400) + 'd ago';
-}
+  async function fetchJSON(url) {
+    try {
+      const r = await fetch(url);
+      if (!r.ok) return null;
+      return await r.json();
+    } catch(e) { console.error('fetch error:', url, e); return null; }
+  }
 
-function sourceTag(src) {
-  const cls = src === 'grok' ? 'tag-grok' : src === 'perplexity' ? 'tag-perplexity' : 'tag-codex';
-  return `<span class="tag ${cls}">${src}</span>`;
-}
+  function winClass(pct) {
+    if (pct >= 75) return 'high';
+    if (pct >= 55) return 'mid';
+    return 'low';
+  }
 
-function predTag(outcome) {
-  const cls = outcome === 'YES' ? 'tag-yes' : 'tag-no';
-  return `<span class="tag ${cls}">${outcome}</span>`;
-}
-
-function resultTag(correct) {
-  if (correct === null || correct === undefined) return '<span class="tag" style="background:rgba(169,189,216,0.1);color:var(--muted)">pending</span>';
-  return correct ? '<span class="tag tag-yes">correct</span>' : '<span class="tag tag-no">wrong</span>';
-}
-
-function bars(data, colors) {
-  const max = Math.max(...Object.values(data), 1);
-  return Object.entries(data).map(([k, v]) => {
-    const pct = (v / max * 100).toFixed(1);
-    const color = colors[k] || 'var(--busy)';
-    return `<div class="bar-row">
-      <div class="bar-label" title="${k}">${k}</div>
-      <div class="bar-track"><div class="bar-fill" style="width:${pct}%;background:${color}"></div></div>
-      <div class="bar-count">${v}</div>
-    </div>`;
-  }).join('');
-}
-
-const srcColors = { grok: 'var(--warn)', perplexity: 'var(--busy)', codex: 'var(--ok)' };
-const catColors = {};
-
-async function refresh() {
-  try {
-    const [stats, factors, preds, markets, weights, scored] = await Promise.all([
-      fetch(API + '/api/stats').then(r => r.json()),
-      fetch(API + '/api/factors/recent?limit=30').then(r => r.json()),
-      fetch(API + '/api/predictions/recent?limit=30').then(r => r.json()),
-      fetch(API + '/api/markets?limit=20').then(r => r.json()),
-      fetch(API + '/api/factors/weights').then(r => r.json()),
-      fetch(API + '/api/analysis/scored?limit=20').then(r => r.json()),
-    ]);
-
-    // Status line
-    document.getElementById('status-line').innerHTML =
-      `<span class="pulse"></span>Live &mdash; Last poll: ${ago(stats.last_poll_at)} &bull; Last research: ${ago(stats.last_factor_at)} &bull; Last prediction: ${ago(stats.last_prediction_at)} &bull; Refresh #${++refreshCount}`;
-
-    // Stats cards
-    document.getElementById('stats-grid').innerHTML = [
-      { label: 'Active Markets', value: stats.active_markets?.toLocaleString(), sub: `${stats.total_markets?.toLocaleString()} total` },
-      { label: 'Factors Collected', value: stats.total_factors?.toLocaleString(), sub: Object.entries(stats.factors_by_source || {}).map(([k,v]) => `${k}: ${v}`).join(' / ') },
-      { label: 'Predictions Made', value: stats.total_predictions?.toLocaleString(), sub: stats.scored_predictions ? `${stats.scored_predictions} scored` : 'none scored yet' },
-      { label: 'Hit Rate', value: stats.overall_hit_rate ? (stats.overall_hit_rate * 100).toFixed(1) + '%' : '—', sub: stats.correct_predictions ? `${stats.correct_predictions}/${stats.scored_predictions} correct` : 'awaiting market resolutions' },
-    ].map(c => `<div class="card"><div class="card-label">${c.label}</div><div class="card-value">${c.value}</div><div class="card-sub">${c.sub}</div></div>`).join('');
-
-    // Source bars
-    document.getElementById('source-bars').innerHTML = bars(stats.factors_by_source || {}, srcColors);
-
-    // Category bars
-    document.getElementById('cat-bars').innerHTML = bars(stats.factors_by_category || {}, catColors);
-
-    // Weights table
-    if (weights.length) {
-      document.getElementById('weights-table-wrap').innerHTML = `<table>
-        <thead><tr><th>Category</th><th>Hit Rate</th><th>Total</th><th>Correct</th><th>Weight</th></tr></thead>
-        <tbody>${weights.map(w => `<tr>
-          <td>${w.category}</td>
-          <td class="confidence" style="color:${w.hit_rate > 0.55 ? 'var(--ok)' : w.hit_rate < 0.45 ? 'var(--bad)' : 'var(--muted)'}">${(w.hit_rate*100).toFixed(1)}%</td>
-          <td>${w.total}</td><td>${w.correct}</td>
-          <td class="confidence">${w.weight.toFixed(2)}</td>
-        </tr>`).join('')}</tbody></table>`;
+  async function refresh() {
+    $('refreshDot').style.background = '#d29922';
+    const d = await fetchJSON('/api/human-dashboard');
+    if (!d || d.error) {
+      $('actionText').textContent = 'Dashboard unavailable: ' + (d ? d.error : 'no response');
+      $('refreshDot').style.background = '#f85149';
+      return;
     }
 
-    // Recent factors
-    document.querySelector('#factors-table tbody').innerHTML = factors.map(f => `<tr>
-      <td class="timestamp">${ago(f.timestamp)}</td>
-      <td>${sourceTag(f.source)}</td>
-      <td><span class="tag" style="background:rgba(95,168,255,0.1);color:var(--busy)">${f.category}</span></td>
-      <td>${f.name}</td>
-      <td style="max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${f.value}">${f.value}</td>
-      <td class="confidence">${f.confidence?.toFixed(2) ?? '—'}</td>
-    </tr>`).join('');
+    // --- ACTION CARD ---
+    const act = d.action || {};
+    const actionEl = $('actionText');
+    if (act.side === 'YES') {
+      actionEl.textContent = act.text || 'Buy YES';
+      actionEl.className = 'hero-action buy-yes';
+    } else if (act.side === 'NO') {
+      actionEl.textContent = act.text || 'Buy NO';
+      actionEl.className = 'hero-action buy-no';
+    } else {
+      actionEl.textContent = act.text || 'No edge right now';
+      actionEl.className = 'hero-action wait';
+    }
+    if (act.side && act.entry_price != null) {
+      $('actionDetail').innerHTML =
+        `<strong>Entry price:</strong> $${Number(act.entry_price).toFixed(2)} &nbsp; ` +
+        `<strong>Edge:</strong> ${Number(act.edge_pct || 0).toFixed(1)}% &nbsp; ` +
+        `<strong>Confidence:</strong> ${esc(act.confidence || '')}`;
+    } else {
+      $('actionDetail').textContent = '';
+    }
+    const reasonsEl = $('actionReasons');
+    const reasons = act.reasoning || [];
+    if (reasons.length > 0) {
+      reasonsEl.innerHTML = reasons.map(r => `<li>${esc(r)}</li>`).join('');
+    } else {
+      reasonsEl.innerHTML = '';
+    }
 
-    // Recent predictions
-    document.querySelector('#preds-table tbody').innerHTML = preds.map(p => `<tr>
-      <td class="timestamp">${ago(p.created_at)}</td>
-      <td class="q-text" title="${p.market_question}">${p.market_question}</td>
-      <td>${predTag(p.predicted_outcome)}</td>
-      <td class="confidence">${(p.confidence*100).toFixed(1)}%</td>
-      <td class="confidence">${(p.entry_yes_price*100).toFixed(1)}%</td>
-      <td>${resultTag(p.correct)}</td>
-    </tr>`).join('');
+    // --- HIT RATE ---
+    const hr = d.hit_rate || {};
+    const hrEl = $('hitRateValue');
+    if (hr.all_time_pct != null) {
+      hrEl.textContent = hr.all_time_pct.toFixed(1) + '%';
+      hrEl.className = 'stat-big ' + (hr.all_time_pct >= 50 ? 'positive' : hr.all_time_pct >= 35 ? 'neutral' : 'negative');
+    } else {
+      hrEl.textContent = '--';
+      hrEl.className = 'stat-big neutral';
+    }
+    $('hitRateDetail').textContent = hr.explanation || '';
 
-    // Top markets
-    document.querySelector('#markets-table tbody').innerHTML = markets.map(m => `<tr>
-      <td class="q-text" title="${m.question}">${m.question}</td>
-      <td><span class="tag" style="background:rgba(95,168,255,0.1);color:var(--busy)">${m.category || '—'}</span></td>
-      <td class="confidence">${(m.yes_price*100).toFixed(1)}%</td>
-      <td class="confidence">$${(m.volume/1000).toFixed(0)}k</td>
-    </tr>`).join('');
+    // --- FRESHNESS ---
+    const fr = d.data_freshness || {};
+    const fStatus = (fr.status || 'unknown').toLowerCase();
+    let tagClass = 'blue';
+    if (fStatus === 'fresh') tagClass = 'green';
+    else if (fStatus === 'recent') tagClass = 'yellow';
+    else if (fStatus === 'stale' || fStatus === 'old') tagClass = 'red';
+    $('freshnessTag').innerHTML = `<span class="tag ${tagClass}">${esc(fr.status || 'Unknown')}</span>`;
+    $('freshnessDetail').textContent = fr.explanation || '';
 
-    // Post-resolution analysis
-    if (scored && scored.length) {
-      document.getElementById('analysis-wrap').innerHTML = scored.map(s => {
-        const icon = s.correct ? '<span style="color:var(--ok)">&#10003;</span>' : '<span style="color:var(--bad)">&#10007;</span>';
-        const cats = (s.categories || []).map(c => `<span class="tag" style="background:rgba(95,168,255,0.1);color:var(--busy)">${c}</span>`).join(' ');
-        const factorRows = (s.top_factors || []).map(f => {
-          const vote = (f.vote === 'YES') ? '<span style="color:var(--ok)">YES</span>'
-                     : (f.vote === 'NO') ? '<span style="color:var(--bad)">NO</span>'
-                     : '<span style="color:var(--muted)">~</span>';
-          return `<tr>
-            <td>${sourceTag(f.source)}</td>
-            <td><span class="tag" style="background:rgba(95,168,255,0.1);color:var(--busy)">${f.category}</span></td>
-            <td>${f.name}</td>
-            <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${f.value}">${f.value}</td>
-            <td>${vote}</td>
-            <td class="confidence">${f.confidence?.toFixed(2) ?? '—'}</td>
-          </tr>`;
-        }).join('');
-        return `<div style="border:1px solid var(--line);border-radius:8px;padding:12px;margin-bottom:12px">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-            <div>
-              ${icon} <strong>${s.market_question}</strong>
-              <span class="timestamp" style="margin-left:8px">${ago(s.created_at)}</span>
-            </div>
-            <div>
-              Predicted: ${predTag(s.predicted_outcome)} at ${(s.confidence*100).toFixed(1)}%
-              &nbsp;|&nbsp; Resolved: <strong>${s.market_resolution || '?'}</strong>
-              &nbsp;|&nbsp; ${s.correct ? '<span style="color:var(--ok)">CORRECT</span>' : '<span style="color:var(--bad)">WRONG</span>'}
-            </div>
-          </div>
-          <div style="margin-bottom:6px;font-size:0.8rem;color:var(--muted)">${s.factors_used} factors across: ${cats || '<span style="color:var(--muted)">no factors (baseline only)</span>'}</div>
-          ${factorRows ? `<table style="font-size:0.78rem">
-            <thead><tr><th>Source</th><th>Category</th><th>Factor</th><th>Value</th><th>Vote</th><th>Conf</th></tr></thead>
-            <tbody>${factorRows}</tbody>
-          </table>` : '<div style="font-size:0.8rem;color:var(--muted)">No factors — prediction used market price baseline only</div>'}
-        </div>`;
+    // --- PAPER TRADES HERO ---
+    const pt = d.paper_trades || {};
+    const ptEl = $('paperValue');
+    if (pt.status === 'not_started') {
+      ptEl.textContent = 'Not Started';
+      ptEl.className = 'stat-big negative';
+    } else if (pt.closed_count > 0) {
+      ptEl.textContent = '$' + Number(pt.total_pnl || 0).toFixed(2);
+      ptEl.className = 'stat-big ' + (pt.total_pnl >= 0 ? 'positive' : 'negative');
+    } else if (pt.open_count > 0) {
+      ptEl.textContent = pt.open_count + ' open';
+      ptEl.className = 'stat-big neutral';
+    } else {
+      ptEl.textContent = '--';
+      ptEl.className = 'stat-big neutral';
+    }
+    $('paperDetail').textContent = pt.explanation || '';
+
+    // --- OPPORTUNITIES TABLE ---
+    const opps = d.opportunities || [];
+    const oppTbody = $('opportunitiesTable').querySelector('tbody');
+    if (opps.length === 0) {
+      oppTbody.innerHTML = '<tr><td colspan="5" class="empty-msg">No opportunities with edge right now. The system is watching and will show trades when rules match active markets.</td></tr>';
+    } else {
+      oppTbody.innerHTML = opps.map(o => {
+        const sideCls = (o.side || '').toUpperCase() === 'YES' ? 'yes' : 'no';
+        const reasons = (o.reasons || []).map(r => esc(r)).join('<br>');
+        return `<tr>
+          <td>${esc(o.question)}</td>
+          <td class="col-action ${sideCls}">${esc(o.action)}</td>
+          <td class="col-edge">${Number(o.edge_pct || 0).toFixed(1)}%</td>
+          <td><span class="tag ${o.confidence === 'High' ? 'green' : o.confidence === 'Medium' ? 'yellow' : 'red'}">${esc(o.confidence || '?')}</span></td>
+          <td class="col-why">${reasons}</td>
+        </tr>`;
       }).join('');
     }
 
-  } catch (e) {
-    document.getElementById('status-line').innerHTML = `<span style="color:var(--bad)">Error: ${e.message}</span>`;
-  }
-}
+    // --- RULES TABLE ---
+    const rules = d.top_rules || [];
+    const rulesTbody = $('rulesTable').querySelector('tbody');
+    if (rules.length === 0) {
+      rulesTbody.innerHTML = '<tr><td colspan="4" class="empty-msg">No rules loaded yet. Rules are generated by analyzing patterns in 500k+ resolved markets.</td></tr>';
+    } else {
+      rulesTbody.innerHTML = rules.map(r => {
+        const wc = winClass(r.win_rate_pct || 0);
+        const sideCls = (r.side || '').toUpperCase() === 'YES' ? 'yes' : 'no';
+        return `<tr>
+          <td>${esc(r.plain_english)}</td>
+          <td class="col-action ${sideCls}">${esc(r.side)}</td>
+          <td class="col-win ${wc}">${Number(r.win_rate_pct || 0).toFixed(1)}%</td>
+          <td>${num(r.sample_size)}</td>
+        </tr>`;
+      }).join('');
+    }
 
-refresh();
-setInterval(refresh, 15000);
+    // --- PAPER TRADE LEDGER ---
+    const ptContent = $('paperTradesContent');
+    if (pt.status === 'not_started') {
+      ptContent.innerHTML = `<div class="empty-msg">${esc(pt.explanation)}</div>`;
+    } else {
+      let html = '';
+      // Open trades
+      if (pt.open_trades && pt.open_trades.length > 0) {
+        html += '<div style="font-size:0.78rem;color:var(--muted);margin-bottom:6px;font-weight:600;">OPEN TRADES</div>';
+        html += '<table><thead><tr><th>Market</th><th>Side</th><th>Entry</th><th>Edge</th></tr></thead><tbody>';
+        html += pt.open_trades.map(t => {
+          const sc = t.side === 'YES' ? 'yes' : 'no';
+          return `<tr>
+            <td>${esc(t.question)}</td>
+            <td class="col-action ${sc}">${esc(t.side)}</td>
+            <td>$${Number(t.entry_price || 0).toFixed(2)}</td>
+            <td class="col-edge">${Number(t.edge_pct || 0).toFixed(1)}%</td>
+          </tr>`;
+        }).join('');
+        html += '</tbody></table>';
+      }
+      // Closed trades
+      if (pt.recent_closed && pt.recent_closed.length > 0) {
+        html += '<div style="font-size:0.78rem;color:var(--muted);margin:12px 0 6px;font-weight:600;">RECENT CLOSED</div>';
+        html += '<table><thead><tr><th>Market</th><th>Side</th><th>Entry</th><th>Result</th><th>P&L</th></tr></thead><tbody>';
+        html += pt.recent_closed.map(t => {
+          const result = t.won ? 'WON' : 'LOST';
+          const resultCls = t.won ? 'win' : 'loss';
+          const pnlCls = (t.pnl || 0) >= 0 ? 'win' : 'loss';
+          return `<tr>
+            <td>${esc(t.question)}</td>
+            <td class="col-action ${t.side === 'YES' ? 'yes' : 'no'}">${esc(t.side)}</td>
+            <td>$${Number(t.entry_price || 0).toFixed(2)}</td>
+            <td class="col-pnl ${resultCls}">${result}</td>
+            <td class="col-pnl ${pnlCls}">${(t.pnl || 0) >= 0 ? '+' : ''}$${Number(t.pnl || 0).toFixed(2)}</td>
+          </tr>`;
+        }).join('');
+        html += '</tbody></table>';
+      }
+      if (!html) {
+        html = `<div class="empty-msg">${esc(pt.explanation)}</div>`;
+      } else if (pt.closed_count > 0) {
+        html += `<div style="margin-top:10px;font-size:0.8rem;color:var(--muted);">Overall: ${pt.closed_count} trades, ${pt.win_rate_pct != null ? pt.win_rate_pct + '% win rate' : 'no results'}, $${Number(pt.total_pnl || 0).toFixed(2)} PnL</div>`;
+      }
+      ptContent.innerHTML = html;
+    }
+
+    // --- SYSTEM HEALTH ---
+    const sys = d.system_health || {};
+    const healthGrid = $('healthGrid');
+    let healthHtml = '';
+
+    // Compute host
+    healthHtml += `<div class="health-item">
+      <div class="health-label">Heavy Compute Server</div>
+      <div class="health-value ${sys.compute_host_ok === true ? 'ok' : sys.compute_host_ok === false ? 'bad' : 'warn'}">
+        ${sys.compute_host_ok === true ? 'Running on correct host' : sys.compute_host_ok === false ? 'WRONG HOST' : 'Pending verification'}
+      </div>
+      <div style="font-size:0.75rem;color:var(--muted);margin-top:4px;">${esc(sys.compute_host_actual)}</div>
+    </div>`;
+
+    // Grok
+    healthHtml += `<div class="health-item">
+      <div class="health-label">Grok Research</div>
+      <div class="health-value ${sys.grok_active ? 'ok' : 'warn'}">${sys.grok_active ? 'Active (last hour)' : 'No activity last hour'}</div>
+    </div>`;
+
+    // Perplexity
+    healthHtml += `<div class="health-item">
+      <div class="health-label">Perplexity Research</div>
+      <div class="health-value ${sys.perplexity_active ? 'ok' : 'warn'}">${sys.perplexity_active ? 'Active (last hour)' : 'No activity last hour'}</div>
+    </div>`;
+
+    // Workers
+    if (sys.workers_total > 0) {
+      const wOk = sys.workers_active >= sys.workers_total * 0.5;
+      healthHtml += `<div class="health-item">
+        <div class="health-label">Codex Workers</div>
+        <div class="health-value ${wOk ? 'ok' : 'warn'}">${sys.workers_active}/${sys.workers_total} active</div>
+      </div>`;
+    }
+
+    // Services
+    const services = sys.services || [];
+    if (services.length > 0) {
+      for (const svc of services) {
+        const isOk = svc.status === 'ok' || svc.status === 'running';
+        healthHtml += `<div class="health-item">
+          <div class="health-label">${esc(svc.name)}</div>
+          <div class="health-value ${isOk ? 'ok' : 'warn'}">${esc(svc.status)}${svc.age_minutes != null ? ' (' + svc.age_minutes + 'm ago)' : ''}</div>
+          <div style="font-size:0.72rem;color:var(--dim);">${esc(svc.host)}</div>
+        </div>`;
+      }
+    }
+
+    healthGrid.innerHTML = healthHtml;
+
+    // --- COUNTS ---
+    const c = d.counts || {};
+    $('cntMarkets').textContent = num(c.total_markets);
+    $('cntActive').textContent = num(c.active_markets);
+    $('cntRules').textContent = num(c.total_rules);
+    $('cntNgrams').textContent = num(c.ngram_patterns);
+    $('cntFactors').textContent = num(c.factors_total);
+    $('cntFeatures').textContent = num(c.features_today);
+
+    // Done
+    $('lastUpdate').textContent = new Date().toLocaleTimeString();
+    $('refreshDot').style.background = '#3fb950';
+  }
+
+  refresh();
+  setInterval(refresh, 30000);
+})();
 </script>
 </body>
 </html>
