@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 import pytest
 
 import polyedge.app as app_module
-from polyedge.app import app, _prediction_edge_pct, _rule_to_plain_english, human_dashboard
+from polyedge.app import app, _iso_utc, _prediction_edge_pct, _rule_to_plain_english, human_dashboard
 
 
 def test_stats_endpoint_registered():
@@ -98,6 +98,10 @@ def test_prediction_edge_pct_invalid_input():
     assert _prediction_edge_pct("YES", 0.60, None) is None
 
 
+def test_iso_utc_formats_with_z_suffix():
+    assert _iso_utc(app_module.datetime(2026, 3, 6, 12, 0, 0)).endswith("Z")
+
+
 def test_human_dashboard_endpoint_registered():
     assert app.url_path_for("human_dashboard") == "/api/human-dashboard"
 
@@ -129,6 +133,7 @@ async def test_human_dashboard_handles_empty_opportunities_without_unbound_error
 
     result = await human_dashboard()
     assert "error" not in result
+    assert result["generated_at"].endswith("Z")
 
 
 class _FakeRule:

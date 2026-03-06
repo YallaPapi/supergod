@@ -145,7 +145,8 @@ async def run_paper_trading():
     from polyedge.models import Market, TradingRule, PaperTrade
     from sqlalchemy import select
 
-    MIN_EDGE = 0.05  # 5% minimum edge
+    MIN_EDGE_TIER1 = 0.05
+    MIN_EDGE_TIER2 = 0.08
 
     async with SessionLocal() as session:
         # Load quality ngram rules — these are fast to evaluate (string match)
@@ -155,6 +156,7 @@ async def run_paper_trading():
                 TradingRule.win_rate >= 0.60,
                 TradingRule.sample_size >= 500,
                 TradingRule.rule_type == "ngram",
+                TradingRule.tier.in_([1, 2]),
             ).order_by(TradingRule.win_rate.desc())
         )).scalars().all()
 
@@ -170,11 +172,14 @@ async def run_paper_trading():
             except (json.JSONDecodeError, TypeError):
                 continue
             phrase = str(cond.get("ngram", "")).strip().lower()
-            if not phrase or len(phrase) < 4:
+            if not phrase:
                 continue
+            tier = int(r.tier or 3)
             parsed_rules.append({
                 "id": r.id, "phrase": phrase, "side": r.predicted_side,
                 "win_rate": r.win_rate, "breakeven": r.breakeven_price or r.win_rate,
+                "tier": tier,
+                "min_edge": MIN_EDGE_TIER1 if tier == 1 else MIN_EDGE_TIER2,
             })
         log.info("Loaded %d ngram rules for paper trading", len(parsed_rules))
 
@@ -182,7 +187,7 @@ async def run_paper_trading():
         markets = (await session.execute(
             select(Market).where(Market.active == True)  # noqa: E712
         )).scalars().all()
-        log.info("Scanning %d active markets for edges >= %d%%", len(markets), int(MIN_EDGE * 100))
+        log.info("Scanning %d active markets for tiered edge thresholds", len(markets))
 
         # Pre-load existing open trades — one trade per market+side
         open_pt_rows = (await session.execute(
@@ -193,7 +198,9 @@ async def run_paper_trading():
 
         trades_opened = 0
         skipped_noise = 0
+        skipped_expired = 0
         batch_pending = 0
+        now = _utcnow_naive()
         for i, market in enumerate(markets):
             q_lower = (market.question or "").lower()
 
@@ -202,8 +209,13 @@ async def run_paper_trading():
                 skipped_noise += 1
                 continue
 
+            # Skip stale markets that are already past end date.
+            if market.end_date is not None and market.end_date < now:
+                skipped_expired += 1
+                continue
+
             yes_price = float(market.yes_price or 0.5)
-            no_price = max(0.001, 1.0 - yes_price)
+            no_price = float(market.no_price) if market.no_price is not None else max(0.001, 1.0 - yes_price)
 
             # Skip dead markets where both sides are near 0 or 1
             if yes_price <= 0.02 or yes_price >= 0.98:
@@ -217,7 +229,7 @@ async def run_paper_trading():
                 side = rule["side"]
                 entry = yes_price if side == "YES" else no_price
                 edge = rule["breakeven"] - entry
-                if edge < MIN_EDGE:
+                if edge < rule["min_edge"]:
                     continue
                 existing = best_by_side.get(side)
                 if existing is None or edge > existing["edge"]:
@@ -256,33 +268,37 @@ async def run_paper_trading():
         if batch_pending > 0:
             await session.commit()
 
-    log.info("Paper trading complete: %d new trades from %d markets (skipped %d noise)",
-             trades_opened, len(markets), skipped_noise)
+    log.info(
+        "Paper trading complete: %d new trades from %d markets (skipped %d noise, %d expired)",
+        trades_opened, len(markets), skipped_noise, skipped_expired,
+    )
 
 
 async def score_paper_trades():
     """Score paper trades for resolved markets."""
     from polyedge.models import Market, PaperTrade
     from polyedge.trading.pnl import calc_pnl
-    from sqlalchemy import select, and_
+    from sqlalchemy import select
 
     async with SessionLocal() as session:
-        # Find open trades where market has resolved
-        open_trades = (await session.execute(
-            select(PaperTrade).where(PaperTrade.resolved == False)
-        )).scalars().all()
+        # Score only open trades whose markets have a concrete resolution label.
+        rows = (await session.execute(
+            select(PaperTrade, Market.resolution)
+            .join(Market, Market.id == PaperTrade.market_id)
+            .where(
+                PaperTrade.resolved == False,  # noqa: E712
+                Market.resolution.is_not(None),
+                Market.resolution != "",
+            )
+        )).all()
 
         scored = 0
-        for trade in open_trades:
-            market = await session.get(Market, trade.market_id)
-            if not market or not market.resolution:
-                continue
-
-            won = (market.resolution.upper() == trade.side)
+        for trade, resolution in rows:
+            won = (str(resolution).upper() == trade.side)
             trade.won = won
             trade.pnl = calc_pnl(trade.entry_price, won)
             trade.resolved = True
-            trade.resolved_at = datetime.utcnow()
+            trade.resolved_at = _utcnow_naive()
             scored += 1
 
         await session.commit()
@@ -361,8 +377,8 @@ async def run_forever():
         # Paper trading: predict + open trades (every 5 min)
         loop(run_paper_trading, 300, "paper_trading"),
 
-        # Score paper trades (every 1 hour)
-        loop(score_paper_trades, 3600, "score_paper_trades"),
+        # Score paper trades (every 5 min)
+        loop(score_paper_trades, 300, "score_paper_trades"),
 
         # Correlation refresh (every 24 hours)
         loop(run_correlation_refresh, 86400, "correlation_refresh"),

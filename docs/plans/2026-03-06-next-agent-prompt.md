@@ -39,8 +39,11 @@ After all changes:
 - Check that the scorer is running every 5 minutes (look at heartbeat timestamps)
 - Verify dashboard at http://89.167.99.187:8090/ looks clean
 
-### 5. Clean Up Old Junk Trades (Optional)
-Mark all paper trades that match `question ILIKE '%up or down%'` or `entry_price <= 0.02` as resolved with `won=false, pnl=0`. This removes them from the open count without deleting data.
+### 5. Clean Up Old Junk Trades (Optional, non-destructive)
+Do **not** rewrite historical outcomes for cosmetic reporting. Keep historical rows intact and:
+- exclude junk cohorts from user-facing metrics with explicit filters
+- show an "excluded cohort" count if needed for transparency
+- preserve original `won` / `pnl` values for auditability
 
 ## Rules
 - ONE CHANGE AT A TIME. Deploy it, test it, confirm it works, then move on.

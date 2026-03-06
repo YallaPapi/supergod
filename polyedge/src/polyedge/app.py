@@ -108,6 +108,16 @@ def _utcnow_naive() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+def _iso_utc(ts: datetime | None) -> str | None:
+    if ts is None:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    else:
+        ts = ts.astimezone(timezone.utc)
+    return ts.isoformat().replace("+00:00", "Z")
+
+
 def _market_dict(m: Market) -> dict:
     return {
         "id": m.id,
@@ -122,8 +132,8 @@ def _market_dict(m: Market) -> dict:
         "resolved": m.resolved,
         "resolution": m.resolution,
         "resolution_source": m.resolution_source,
-        "end_date": str(m.end_date) if m.end_date else None,
-        "updated_at": str(m.updated_at) if m.updated_at else None,
+        "end_date": _iso_utc(m.end_date),
+        "updated_at": _iso_utc(m.updated_at),
     }
 
 
@@ -137,7 +147,7 @@ def _factor_dict(f: Factor) -> dict:
         "value": f.value,
         "source": f.source,
         "confidence": f.confidence,
-        "timestamp": str(f.timestamp) if f.timestamp else None,
+        "timestamp": _iso_utc(f.timestamp),
     }
 
 
@@ -151,8 +161,8 @@ def _prediction_dict(p: Prediction) -> dict:
         "factor_ids": p.factor_ids,
         "factor_categories": p.factor_categories,
         "correct": p.correct,
-        "created_at": str(p.created_at) if p.created_at else None,
-        "resolved_at": str(p.resolved_at) if p.resolved_at else None,
+        "created_at": _iso_utc(p.created_at),
+        "resolved_at": _iso_utc(p.resolved_at),
     }
 
 
@@ -798,6 +808,8 @@ async def human_dashboard():
                     "sample_size": r.sample_size or 0,
                     "rule_type": r.rule_type,
                     "name": r.name,
+                    "tier": int(r.tier or 3),
+                    "quality_label": r.quality_label or "exploratory",
                 })
 
             # --- TOP OPPORTUNITIES (from open paper trades — already scanned all markets) ---
@@ -822,6 +834,8 @@ async def human_dashboard():
                 wr_pct = round((rule.win_rate or 0) * 100, 1) if rule else 0
                 action_text = f"Buy {side} at ${entry:.2f}"
                 reason = _rule_to_plain_english(rule) if rule else "Unknown pattern"
+                rule_tier = int(rule.tier or 3) if rule else 3
+                quality_label = (rule.quality_label or "exploratory") if rule else "unknown"
                 opportunities.append({
                     "question": (question or "?")[:120],
                     "action": action_text,
@@ -830,9 +844,11 @@ async def human_dashboard():
                     "entry_price": round(entry, 3),
                     "confidence": _confidence_label(wr_pct),
                     "rules_agreeing": 1,
-                    "reasons": [reason],
+                    "reasons": [f"[Tier {rule_tier}] {reason}"],
+                    "rule_tier": rule_tier,
+                    "quality_label": quality_label,
                     "volume": float(volume or 0),
-                    "resolves_at": str(end_date) if end_date else "Unknown",
+                    "resolves_at": _iso_utc(end_date) if end_date else "Unknown",
                 })
 
             # --- ENDING SOONEST (markets we have trades on, resolving soon) ---
@@ -856,7 +872,7 @@ async def human_dashboard():
                     "side": trade.side,
                     "entry_price": round(float(trade.entry_price or 0), 3),
                     "edge_pct": round(float(trade.edge or 0) * 100, 1),
-                    "resolves_at": str(end_date) if end_date else "Unknown",
+                    "resolves_at": _iso_utc(end_date) if end_date else "Unknown",
                     "volume": float(volume or 0),
                 }
             ending_soonest = list(seen_ending.values())[:20]
@@ -961,7 +977,7 @@ async def human_dashboard():
                     "entry_price": round(float(trade.entry_price or 0), 3),
                     "won": trade.won,
                     "pnl": round(float(trade.pnl or 0), 4),
-                    "resolved_at": str(trade.resolved_at) if trade.resolved_at else None,
+                    "resolved_at": _iso_utc(trade.resolved_at),
                 })
 
             # Open trades — with rule explanation, filter junk, dedup by market
@@ -983,14 +999,18 @@ async def human_dashboard():
                     continue
                 if mid not in seen_markets:
                     reason = _rule_to_plain_english(rule) if rule else "Unknown pattern"
+                    rule_tier = int(rule.tier or 3) if rule else 3
+                    quality_label = (rule.quality_label or "exploratory") if rule else "unknown"
                     seen_markets[mid] = {
                         "question": q[:120],
                         "side": trade.side,
                         "entry_price": round(float(trade.entry_price or 0), 3),
                         "edge_pct": round(float(trade.edge or 0) * 100, 1),
-                        "created_at": str(trade.created_at) if trade.created_at else None,
-                        "resolves_at": str(end_date) if end_date else "Unknown",
+                        "created_at": _iso_utc(trade.created_at),
+                        "resolves_at": _iso_utc(end_date) if end_date else "Unknown",
                         "rule_reason": reason,
+                        "rule_tier": rule_tier,
+                        "quality_label": quality_label,
                         "rules_matched": 1,
                     }
                 else:
@@ -1101,6 +1121,9 @@ async def human_dashboard():
             for src, cnt in source_rows:
                 source_counts[str(src)] = int(cnt)
 
+            score_hb = next((hb for hb in heartbeats if hb.service == "score_paper_trades"), None)
+            last_scored_at = _iso_utc(score_hb.last_success_at if score_hb else None)
+
             compute_ok = None
             if expected_host and compute_hosts:
                 compute_ok = all(
@@ -1137,7 +1160,7 @@ async def human_dashboard():
             )).scalar() or 0
 
             return {
-                "generated_at": str(now),
+                "generated_at": _iso_utc(now),
                 "action": action,
                 "hit_rate": {
                     "primary_pct": pt_hit,
@@ -1164,6 +1187,7 @@ async def human_dashboard():
                 "paper_trades": {
                     "status": pt_status,
                     "explanation": pt_explanation,
+                    "last_scored_at": last_scored_at,
                     "open_count": open_count,
                     "closed_count": closed_count,
                     "total_pnl": round(float(total_pnl), 2),
@@ -1206,7 +1230,7 @@ async def human_dashboard():
             }
     except Exception as e:
         log.exception("human_dashboard failed")
-        return {"error": str(e), "generated_at": str(now)}
+        return {"error": str(e), "generated_at": _iso_utc(now)}
 
 
 @app.get("/api/markets")

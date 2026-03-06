@@ -116,6 +116,8 @@ class TradingRule(Base):
     breakeven_price: Mapped[float] = mapped_column(Float)
     avg_roi: Mapped[float] = mapped_column(Float, default=0)
     market_filter: Mapped[str] = mapped_column(Text, default="")
+    tier: Mapped[int] = mapped_column(Integer, default=3)
+    quality_label: Mapped[str] = mapped_column(String(20), default="exploratory")
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

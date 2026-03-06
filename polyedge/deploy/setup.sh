@@ -22,8 +22,18 @@ cd /opt/polyedge/polyedge
 python3 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 
-# Run migrations
+# Run migrations (alembic + v3 SQL)
 .venv/bin/alembic upgrade head
+echo "Running v3 table migrations..."
+for migration in \
+    deploy/migrations/001_v3_tables.sql \
+    deploy/migrations/002_market_resolution_source.sql \
+    deploy/migrations/003_service_heartbeats.sql \
+    deploy/migrations/004_trading_rule_tier.sql
+do
+    echo "Applying $migration"
+    sudo -u postgres psql -d polyedge -f "$migration" 2>&1 | grep -v "already exists" || true
+done
 
 # Install systemd services
 cp deploy/polyedge.service /etc/systemd/system/

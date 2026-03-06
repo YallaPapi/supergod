@@ -135,14 +135,14 @@ These match so broadly they're essentially just measuring the base rate of NO re
 
 ---
 
-## PROBLEM 9: "Ending Soonest" Shows Past-Due Markets
+## PROBLEM 9: Past-Due Markets Still Pollute Open-Trade Views
 
-**What's wrong:** Markets with 2025 end dates appear in "Ending Soonest" because they're still `active=true` and `resolved=false`. The `end_date >= now` filter was added but these old markets have end_date < now so they should be filtered. HOWEVER, the first items that appear are 2025-dated markets because they got through before the filter was added to the queries.
+**What's wrong:** Past-due markets can still inflate open-trade counts and appear in broader panels if stale unresolved rows are not reconciled. The `ending_soonest` query already applies `Market.end_date >= now`, so this is primarily a stale-market lifecycle and date-normalization problem (Problem 1), not only a sort/filter placement issue.
 
 **Fix needed:**
-1. The `ending_soonest` query in app.py already has `Market.end_date >= now` — verify this is working
-2. The underlying issue is Problem 1 (stale markets) — fix that and this fixes itself
-3. Also verify the `ending_soonest` query deployed correctly (check for stale .pyc cache issues)
+1. Keep all user-facing open-trade metrics on one canonical "real trade + future end date" predicate.
+2. Reconcile stale unresolved markets so expired rows stop polluting aggregate counts.
+3. Normalize UTC serialization/parsing so date labels are consistent across environments.
 
 **Files:** `polyedge/src/polyedge/app.py` (ending_soonest query)
 
@@ -219,3 +219,4 @@ These match so broadly they're essentially just measuring the base rate of NO re
 4. **Clean up "up or down" old trades** (Problem 3) — cosmetic but important
 5. **Categories from Polymarket** (Problem 7) — nice to have
 6. **Everything else** — lower priority
+
