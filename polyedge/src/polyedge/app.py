@@ -736,29 +736,59 @@ async def human_dashboard():
 
     try:
         async with SessionLocal() as session:
-            # --- HIT RATES ---
-            scored_all = (await session.execute(
-                select(func.count(Prediction.id)).where(Prediction.correct != None)
+            # --- ACCURACY METRICS ---
+            # Count rules by quality tier
+            rule_count_high = (await session.execute(
+                select(func.count(TradingRule.id)).where(
+                    TradingRule.active == True,  # noqa: E712
+                    TradingRule.sample_size >= 500,
+                    TradingRule.win_rate >= 0.70,
+                )
             )).scalar() or 0
-            correct_all = (await session.execute(
-                select(func.count(Prediction.id)).where(Prediction.correct == True)
-            )).scalar() or 0
-            scored_24h = (await session.execute(
-                select(func.count(Prediction.id)).where(
-                    Prediction.correct != None, Prediction.created_at >= day_cutoff)
-            )).scalar() or 0
-            correct_24h = (await session.execute(
-                select(func.count(Prediction.id)).where(
-                    Prediction.correct == True, Prediction.created_at >= day_cutoff)
+            rule_count_mid = (await session.execute(
+                select(func.count(TradingRule.id)).where(
+                    TradingRule.active == True,  # noqa: E712
+                    TradingRule.sample_size >= 500,
+                    TradingRule.win_rate >= 0.55,
+                    TradingRule.win_rate < 0.70,
+                )
             )).scalar() or 0
 
-            hit_all = round(correct_all / scored_all * 100, 1) if scored_all else None
-            hit_24h = round(correct_24h / scored_24h * 100, 1) if scored_24h else None
+            # How many current opportunities have real edge?
+            # (we'll count from the opportunities list built below)
 
-            # --- TOP RULES (best win rate, enough samples) ---
+            # Paper trade win rate — only count real trades (not "up or down" noise, not dead markets)
+            _pt_filter = (
+                select(PaperTrade.id)
+                .join(Market, Market.id == PaperTrade.market_id)
+                .where(
+                    PaperTrade.resolved == True,
+                    PaperTrade.entry_price > 0.02,
+                    ~Market.question.ilike("%up or down%"),
+                )
+            )
+            pt_scored = (await session.execute(
+                select(func.count()).select_from(_pt_filter.subquery())
+            )).scalar() or 0
+            _pt_correct_q = (
+                select(PaperTrade.id)
+                .join(Market, Market.id == PaperTrade.market_id)
+                .where(
+                    PaperTrade.resolved == True,
+                    PaperTrade.pnl > 0,
+                    PaperTrade.entry_price > 0.02,
+                    ~Market.question.ilike("%up or down%"),
+                )
+            )
+            pt_correct = (await session.execute(
+                select(func.count()).select_from(_pt_correct_q.subquery())
+            )).scalar() or 0
+            pt_hit = round(pt_correct / pt_scored * 100, 1) if pt_scored else None
+
+            # --- TOP RULES (best win rate, serious sample sizes only) ---
             top_rules_rows = (await session.execute(
                 select(TradingRule)
-                .where(TradingRule.active == True, TradingRule.sample_size >= 30)
+                .where(TradingRule.active == True, TradingRule.sample_size >= 500)
                 .order_by(desc(TradingRule.win_rate), desc(TradingRule.sample_size))
                 .limit(20)
             )).scalars().all()
@@ -775,98 +805,71 @@ async def human_dashboard():
                     "name": r.name,
                 })
 
-            # --- TOP OPPORTUNITIES (rules with edge on live markets) ---
-            # Get top 100 highest-quality rules for fast matching
-            best_rules = (await session.execute(
-                select(TradingRule)
+            # --- TOP OPPORTUNITIES (from open paper trades — already scanned all markets) ---
+            # Filter: entry > $0.02 (skip dead markets)
+            opp_rows = (await session.execute(
+                select(PaperTrade, Market.question, Market.end_date, Market.volume, TradingRule)
+                .join(Market, Market.id == PaperTrade.market_id)
+                .outerjoin(TradingRule, TradingRule.id == PaperTrade.rule_id)
                 .where(
-                    TradingRule.active == True,
-                    TradingRule.sample_size >= 30,
-                    TradingRule.win_rate >= 0.55,
+                    PaperTrade.resolved == False,
+                    PaperTrade.entry_price > 0.02,
                 )
-                .order_by(desc(TradingRule.win_rate), desc(TradingRule.sample_size))
-                .limit(200)
-            )).scalars().all()
-
-            # Pre-parse ngram rules for fast matching.
-            # Only use multi-word ngrams (n >= 2) to reduce false substring hits.
-            import re as _re
-            ngram_rules = []
-            for r in best_rules:
-                try:
-                    cond = (
-                        json.loads(r.conditions_json)
-                        if isinstance(r.conditions_json, str)
-                        else (r.conditions_json or {})
-                    )
-                except (json.JSONDecodeError, TypeError):
-                    continue
-                if r.rule_type == "ngram":
-                    phrase = (cond.get("ngram") or "").lower().strip()
-                    n = cond.get("n", len(phrase.split()))
-                    if phrase and n >= 2:
-                        ngram_rules.append((phrase, r))
-
-            # Get a wider set of active markets to find real edges
-            markets = (await session.execute(
-                select(Market)
-                .where(Market.active == True, Market.volume > 5000)
-                .order_by(desc(Market.volume))
-                .limit(1000)
-            )).scalars().all()
+                .order_by(desc(PaperTrade.edge))
+                .limit(30)
+            )).all()
 
             opportunities = []
-            for mkt in markets:
-                q_lower = (mkt.question or "").lower()
-                q_words = set(_re.findall(r'\b\w+\b', q_lower))
-                yes_price = float(mkt.yes_price or 0.5)
-                no_price = max(0.001, 1.0 - yes_price)
-                matching = []
-
-                for phrase, rule in ngram_rules:
-                    # Require all words of the ngram to appear as whole words
-                    phrase_words = phrase.split()
-                    if not all(w in q_words for w in phrase_words):
-                        continue
-                    # Also require the exact phrase as substring
-                    if phrase not in q_lower:
-                        continue
-                    side = rule.predicted_side
-                    entry = yes_price if side == "YES" else no_price
-                    edge = (rule.breakeven_price or rule.win_rate or 0.5) - entry
-                    if edge <= 0.01:
-                        continue
-                    matching.append({
-                        "rule_plain": _rule_to_plain_english(rule),
-                        "side": side,
-                        "edge_pct": round(edge * 100, 1),
-                        "entry_price": round(entry, 3),
-                        "win_rate_pct": round((rule.win_rate or 0) * 100, 1),
-                        "sample_size": rule.sample_size or 0,
-                    })
-
-                if not matching:
+            for trade, question, end_date, volume, rule in opp_rows:
+                if "up or down" in (question or "").lower():
                     continue
-
-                # Pick the best matching rule
-                best = max(matching, key=lambda m: m["edge_pct"])
-                reasons = [m["rule_plain"] for m in matching[:3]]
-                action_text = f"Buy {best['side']} at ${best['entry_price']:.2f}"
-
+                side = trade.side
+                entry = float(trade.entry_price or 0)
+                edge_pct = round(float(trade.edge or 0) * 100, 1)
+                wr_pct = round((rule.win_rate or 0) * 100, 1) if rule else 0
+                action_text = f"Buy {side} at ${entry:.2f}"
+                reason = _rule_to_plain_english(rule) if rule else "Unknown pattern"
                 opportunities.append({
-                    "question": mkt.question[:120],
+                    "question": (question or "?")[:120],
                     "action": action_text,
-                    "side": best["side"],
-                    "edge_pct": best["edge_pct"],
-                    "entry_price": best["entry_price"],
-                    "confidence": _confidence_label(best["win_rate_pct"]),
-                    "rules_agreeing": len(matching),
-                    "reasons": reasons,
-                    "volume": float(mkt.volume or 0),
+                    "side": side,
+                    "edge_pct": edge_pct,
+                    "entry_price": round(entry, 3),
+                    "confidence": _confidence_label(wr_pct),
+                    "rules_agreeing": 1,
+                    "reasons": [reason],
+                    "volume": float(volume or 0),
+                    "resolves_at": str(end_date) if end_date else "Unknown",
                 })
 
-            opportunities.sort(key=lambda o: o["edge_pct"], reverse=True)
-            opportunities = opportunities[:15]
+            # --- ENDING SOONEST (markets we have trades on, resolving soon) ---
+            ending_rows = (await session.execute(
+                select(PaperTrade, Market.question, Market.end_date, Market.volume)
+                .join(Market, Market.id == PaperTrade.market_id)
+                .where(
+                    PaperTrade.resolved == False,
+                    Market.end_date != None,
+                    Market.end_date >= now,
+                )
+                .order_by(Market.end_date.asc())
+                .limit(100)
+            )).all()
+            # Deduplicate by market_id, skip noise
+            seen_ending: dict[str, dict] = {}
+            for trade, question, end_date, volume in ending_rows:
+                mid = trade.market_id
+                q = (question or "?")
+                if mid in seen_ending or "up or down" in q.lower():
+                    continue
+                seen_ending[mid] = {
+                    "question": q[:120],
+                    "side": trade.side,
+                    "entry_price": round(float(trade.entry_price or 0), 3),
+                    "edge_pct": round(float(trade.edge or 0) * 100, 1),
+                    "resolves_at": str(end_date) if end_date else "Unknown",
+                    "volume": float(volume or 0),
+                }
+            ending_soonest = list(seen_ending.values())[:20]
 
             # --- TOP ACTION (best single opportunity) ---
             if opportunities:
@@ -879,6 +882,20 @@ async def human_dashboard():
                     "market_question": top["question"],
                     "entry_price": top["entry_price"],
                     "reasoning": top["reasons"],
+                }
+            elif open_count > 0:
+                action = {
+                    "text": f"{open_count:,} trades open — waiting for markets to resolve.",
+                    "side": None,
+                    "edge_pct": 0,
+                    "confidence": "None",
+                    "market_question": None,
+                    "entry_price": None,
+                    "reasoning": [
+                        f"The scanner placed {open_count:,} paper trades. "
+                        "Edges were found when trades were opened. "
+                        "New opportunities appear when prices move."
+                    ],
                 }
             else:
                 action = {
@@ -893,19 +910,31 @@ async def human_dashboard():
                     ],
                 }
 
-            # --- PAPER TRADES ---
+            # --- PAPER TRADES (exclude junk: "up or down", entry <= $0.02) ---
+            _junk = Market.question.ilike("%up or down%")
             open_count = (await session.execute(
-                select(func.count(PaperTrade.id)).where(PaperTrade.resolved == False)
+                select(func.count(PaperTrade.id))
+                .join(Market, Market.id == PaperTrade.market_id)
+                .where(PaperTrade.resolved == False,
+                       PaperTrade.entry_price > 0.02, ~_junk)
             )).scalar() or 0
             closed_count = (await session.execute(
-                select(func.count(PaperTrade.id)).where(PaperTrade.resolved == True)
+                select(func.count(PaperTrade.id))
+                .join(Market, Market.id == PaperTrade.market_id)
+                .where(PaperTrade.resolved == True,
+                       PaperTrade.entry_price > 0.02, ~_junk)
             )).scalar() or 0
             total_pnl = (await session.execute(
-                select(func.sum(PaperTrade.pnl)).where(PaperTrade.resolved == True)
+                select(func.sum(PaperTrade.pnl))
+                .join(Market, Market.id == PaperTrade.market_id)
+                .where(PaperTrade.resolved == True,
+                       PaperTrade.entry_price > 0.02, ~_junk)
             )).scalar() or 0.0
             wins = (await session.execute(
-                select(func.count(PaperTrade.id)).where(
-                    PaperTrade.resolved == True, PaperTrade.won == True)
+                select(func.count(PaperTrade.id))
+                .join(Market, Market.id == PaperTrade.market_id)
+                .where(PaperTrade.resolved == True, PaperTrade.won == True,
+                       PaperTrade.entry_price > 0.02, ~_junk)
             )).scalar() or 0
             pt_win_rate = round(wins / closed_count * 100, 1) if closed_count else None
 
@@ -913,28 +942,28 @@ async def human_dashboard():
                 pt_status = "not_started"
                 pt_explanation = (
                     "No paper trades have been placed yet. "
-                    "The paper trading scheduler needs to be running on the compute server "
-                    "(WIN-OVKDV67ULMM / 88.99.142.89). Once started, it checks for "
-                    "opportunities every 5 minutes and places simulated trades automatically."
+                    "The paper trading scheduler needs to be running on the compute server."
                 )
             elif open_count > 0 and closed_count == 0:
                 pt_status = "active_no_results"
                 pt_explanation = (
-                    f"{open_count} paper trades are open but none have resolved yet. "
+                    f"{open_count:,} paper trades are open but none have resolved yet. "
                     "Trades resolve when markets settle on Polymarket."
                 )
             else:
                 pt_status = "active"
                 pt_explanation = (
-                    f"{open_count} open, {closed_count} closed. "
+                    f"{open_count:,} open, {closed_count} closed. "
                     f"Win rate: {pt_win_rate}%. Total PnL: ${total_pnl:.2f}."
                 )
 
-            # Recent closed trades for the ledger
+            # Recent closed trades for the ledger (exclude junk)
             recent_trades_rows = (await session.execute(
                 select(PaperTrade, Market.question)
                 .join(Market, Market.id == PaperTrade.market_id)
-                .where(PaperTrade.resolved == True)
+                .where(PaperTrade.resolved == True,
+                       PaperTrade.entry_price > 0.02,
+                       ~Market.question.ilike("%up or down%"))
                 .order_by(desc(PaperTrade.resolved_at))
                 .limit(20)
             )).all()
@@ -949,23 +978,74 @@ async def human_dashboard():
                     "resolved_at": str(trade.resolved_at) if trade.resolved_at else None,
                 })
 
-            # Open trades
+            # Open trades — with rule explanation, filter junk, dedup by market
+            page_size = 30
             open_trades_rows = (await session.execute(
-                select(PaperTrade, Market.question)
+                select(PaperTrade, Market.question, Market.end_date, TradingRule)
                 .join(Market, Market.id == PaperTrade.market_id)
-                .where(PaperTrade.resolved == False)
+                .outerjoin(TradingRule, TradingRule.id == PaperTrade.rule_id)
+                .where(
+                    PaperTrade.resolved == False,
+                    PaperTrade.entry_price > 0.02,
+                )
                 .order_by(desc(PaperTrade.edge))
-                .limit(20)
             )).all()
-            open_trades_list = []
-            for trade, question in open_trades_rows:
-                open_trades_list.append({
-                    "question": (question or "?")[:80],
-                    "side": trade.side,
-                    "entry_price": round(float(trade.entry_price or 0), 3),
-                    "edge_pct": round(float(trade.edge or 0) * 100, 1),
-                    "created_at": str(trade.created_at) if trade.created_at else None,
-                })
+            # Group by market_id — keep best edge, attach rule reason
+            seen_markets: dict[str, dict] = {}
+            for trade, question, end_date, rule in open_trades_rows:
+                mid = trade.market_id
+                q = (question or "?")
+                # Skip high-frequency noise
+                if "up or down" in q.lower():
+                    continue
+                if mid not in seen_markets:
+                    reason = _rule_to_plain_english(rule) if rule else "Unknown pattern"
+                    seen_markets[mid] = {
+                        "question": q[:120],
+                        "side": trade.side,
+                        "entry_price": round(float(trade.entry_price or 0), 3),
+                        "edge_pct": round(float(trade.edge or 0) * 100, 1),
+                        "created_at": str(trade.created_at) if trade.created_at else None,
+                        "resolves_at": str(end_date) if end_date else "Unknown",
+                        "rule_reason": reason,
+                        "rules_matched": 1,
+                    }
+                else:
+                    seen_markets[mid]["rules_matched"] += 1
+            all_open_trades = sorted(
+                seen_markets.values(), key=lambda x: x["edge_pct"], reverse=True
+            )
+            open_trades_list = all_open_trades[:page_size]
+            total_unique_open = len(all_open_trades)
+
+            # --- PAPER TRADE STATS ---
+            # Count trades ending today / this week
+            from sqlalchemy import cast
+            ending_today = (await session.execute(
+                select(func.count(func.distinct(PaperTrade.market_id)))
+                .join(Market, Market.id == PaperTrade.market_id)
+                .where(
+                    PaperTrade.resolved == False,
+                    Market.end_date >= now,
+                    Market.end_date < now.replace(hour=23, minute=59, second=59),
+                )
+            )).scalar() or 0
+            ending_week = (await session.execute(
+                select(func.count(func.distinct(PaperTrade.market_id)))
+                .join(Market, Market.id == PaperTrade.market_id)
+                .where(
+                    PaperTrade.resolved == False,
+                    Market.end_date >= now,
+                    Market.end_date < now.replace(hour=0, minute=0, second=0) + timedelta(days=7),
+                )
+            )).scalar() or 0
+
+            # Average edge
+            avg_edge_raw = (await session.execute(
+                select(func.avg(PaperTrade.edge))
+                .where(PaperTrade.resolved == False, PaperTrade.entry_price > 0.02)
+            )).scalar()
+            avg_edge_pct = round(float(avg_edge_raw or 0) * 100, 1)
 
             # --- DATA FRESHNESS ---
             latest_factor_at = (await session.execute(
@@ -1078,25 +1158,26 @@ async def human_dashboard():
                 "generated_at": str(now),
                 "action": action,
                 "hit_rate": {
-                    "all_time_pct": hit_all,
-                    "all_time_total": scored_all,
-                    "all_time_correct": correct_all,
-                    "last_24h_pct": hit_24h,
-                    "last_24h_total": scored_24h,
-                    "last_24h_correct": correct_24h,
+                    "primary_pct": pt_hit,
+                    "primary_label": "Paper Trade Results",
+                    "rules_high_confidence": rule_count_high,
+                    "rules_medium_confidence": rule_count_mid,
+                    "opportunities_now": len(opportunities),
+                    "paper_trade_pct": pt_hit,
+                    "paper_trade_scored": pt_scored,
+                    "paper_trade_correct": pt_correct,
                     "explanation": (
-                        f"Overall prediction accuracy: {hit_all}% "
-                        f"({correct_all:,} correct out of {scored_all:,}). "
-                        if hit_all else "No scored predictions yet. "
+                        f"Paper trade results: {pt_hit}% win rate ({pt_correct} wins out of {pt_scored} trades). "
+                        if pt_scored > 0 and pt_hit is not None else
+                        f"{open_count:,} paper trades open, waiting for markets to resolve. "
+                        if open_count > 0 else
+                        "Paper trader hasn't started yet. "
                     ) + (
-                        f"Last 24h: {hit_24h}% ({correct_24h:,}/{scored_24h:,}). "
-                        if hit_24h else ""
-                    ) + (
-                        "Note: this includes all predictions. "
-                        "Trading rules have 55-100% individual win rates."
+                        f"Each trade is backed by a rule proven on 500+ resolved markets."
                     ),
                 },
                 "opportunities": opportunities,
+                "ending_soonest": ending_soonest,
                 "top_rules": top_rules,
                 "paper_trades": {
                     "status": pt_status,
@@ -1106,7 +1187,11 @@ async def human_dashboard():
                     "total_pnl": round(float(total_pnl), 2),
                     "win_rate_pct": pt_win_rate,
                     "open_trades": open_trades_list,
+                    "total_unique_open": total_unique_open,
                     "recent_closed": recent_trades,
+                    "ending_today": ending_today,
+                    "ending_this_week": ending_week,
+                    "avg_edge_pct": avg_edge_pct,
                 },
                 "data_freshness": {
                     "status": freshness_status,

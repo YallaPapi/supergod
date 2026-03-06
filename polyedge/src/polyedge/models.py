@@ -23,6 +23,7 @@ class Market(Base):
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     resolved: Mapped[bool] = mapped_column(Boolean, default=False)
     resolution: Mapped[str | None] = mapped_column(String)
+    resolution_source: Mapped[str] = mapped_column(String, default="")
     clob_token_ids: Mapped[str] = mapped_column(Text, default="")
     first_seen: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -148,4 +149,15 @@ class NgramStat(Base):
     no_count: Mapped[int] = mapped_column(Integer)
     yes_rate: Mapped[float] = mapped_column(Float)
     no_rate: Mapped[float] = mapped_column(Float)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class ServiceHeartbeat(Base):
+    """Runtime heartbeat for scheduler services/loops."""
+    __tablename__ = "service_heartbeats"
+    service: Mapped[str] = mapped_column(String(80), primary_key=True)
+    host: Mapped[str] = mapped_column(String(120), default="")
+    status: Mapped[str] = mapped_column(String(20), default="unknown")
+    details: Mapped[str] = mapped_column(Text, default="")
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

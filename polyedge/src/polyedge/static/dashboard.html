@@ -118,7 +118,7 @@
   </div>
   <!-- Hit rate -->
   <div class="hero-card" id="hitRateCard">
-    <h3>How Accurate Are We?</h3>
+    <h3>Are We Making Money?</h3>
     <div class="stat-big neutral" id="hitRateValue">--</div>
     <div class="stat-sub" id="hitRateDetail">Loading...</div>
   </div>
@@ -136,21 +136,42 @@
   </div>
 </div>
 
-<!-- OPPORTUNITIES TABLE -->
+<!-- ENDING SOONEST -->
 <div class="section">
   <div class="panel">
-    <div class="panel-title">Trade Opportunities</div>
-    <div class="panel-explain">Markets where our rules see an edge vs the current market price. "Edge" means we think the true probability differs from what the market is pricing.</div>
+    <div class="panel-title">Ending Soonest</div>
+    <div class="panel-explain">Markets we have paper trades on that resolve the soonest — like eBay auctions ending soon. These will be scored first.</div>
+    <div style="overflow-x:auto; max-height: 400px; overflow-y: auto;">
+      <table id="endingSoonestTable">
+        <thead><tr>
+          <th style="width:40%">Market Question</th>
+          <th>Our Bet</th>
+          <th>Entry</th>
+          <th>Edge</th>
+          <th>Ends</th>
+        </tr></thead>
+        <tbody><tr><td colspan="5" class="empty-msg">Loading...</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- TRADE OPPORTUNITIES -->
+<div class="section">
+  <div class="panel">
+    <div class="panel-title">Biggest Edges Right Now</div>
+    <div class="panel-explain">Open paper trades with the highest edge — where the market price is most wrong compared to what our rules predict.</div>
     <div style="overflow-x:auto; max-height: 400px; overflow-y: auto;">
       <table id="opportunitiesTable">
         <thead><tr>
-          <th style="width:40%">Market Question</th>
+          <th style="width:35%">Market Question</th>
           <th>Action</th>
           <th>Edge</th>
+          <th>Resolves</th>
           <th>Confidence</th>
-          <th style="width:30%">Why (rules that agree)</th>
+          <th style="width:25%">Why (rules that agree)</th>
         </tr></thead>
-        <tbody><tr><td colspan="5" class="empty-msg">Loading...</td></tr></tbody>
+        <tbody><tr><td colspan="6" class="empty-msg">Loading...</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -219,6 +240,22 @@
     return d.innerHTML;
   }
   function num(n) { return n != null ? Number(n).toLocaleString() : '--'; }
+  function fmtDate(s) {
+    if (!s || s === 'Unknown' || s === 'None') return 'TBD';
+    try {
+      const d = new Date(s);
+      if (isNaN(d)) return 'TBD';
+      const now = new Date();
+      const diffMs = d - now;
+      const diffDays = Math.ceil(diffMs / 86400000);
+      const dateStr = d.toLocaleDateString('en-US', {month:'short', day:'numeric'});
+      if (diffDays < 0) return dateStr + ' (past)';
+      if (diffDays === 0) return 'Today';
+      if (diffDays === 1) return 'Tomorrow';
+      if (diffDays <= 7) return `${diffDays}d (${dateStr})`;
+      return dateStr;
+    } catch(e) { return 'TBD'; }
+  }
 
   async function fetchJSON(url) {
     try {
@@ -275,11 +312,16 @@
     // --- HIT RATE ---
     const hr = d.hit_rate || {};
     const hrEl = $('hitRateValue');
-    if (hr.all_time_pct != null) {
-      hrEl.textContent = hr.all_time_pct.toFixed(1) + '%';
-      hrEl.className = 'stat-big ' + (hr.all_time_pct >= 50 ? 'positive' : hr.all_time_pct >= 35 ? 'neutral' : 'negative');
+    if (hr.paper_trade_pct != null) {
+      // We have paper trade results - show them
+      hrEl.textContent = hr.paper_trade_pct.toFixed(1) + '%';
+      hrEl.className = 'stat-big ' + (hr.paper_trade_pct >= 55 ? 'positive' : hr.paper_trade_pct >= 45 ? 'neutral' : 'negative');
+    } else if (hr.opportunities_now > 0) {
+      // No paper trades yet but we have opportunities
+      hrEl.textContent = hr.opportunities_now + ' edges';
+      hrEl.className = 'stat-big positive';
     } else {
-      hrEl.textContent = '--';
+      hrEl.textContent = 'Waiting';
       hrEl.className = 'stat-big neutral';
     }
     $('hitRateDetail').textContent = hr.explanation || '';
@@ -304,29 +346,56 @@
       ptEl.textContent = '$' + Number(pt.total_pnl || 0).toFixed(2);
       ptEl.className = 'stat-big ' + (pt.total_pnl >= 0 ? 'positive' : 'negative');
     } else if (pt.open_count > 0) {
-      ptEl.textContent = pt.open_count + ' open';
+      ptEl.textContent = num(pt.open_count) + ' open';
       ptEl.className = 'stat-big neutral';
     } else {
       ptEl.textContent = '--';
       ptEl.className = 'stat-big neutral';
     }
-    $('paperDetail').textContent = pt.explanation || '';
+    let paperSummary = pt.explanation || '';
+    if (pt.ending_today || pt.ending_this_week || pt.avg_edge_pct) {
+      paperSummary += ' | ' + (pt.ending_today || 0) + ' ending today, '
+        + (pt.ending_this_week || 0) + ' this week. Avg edge: '
+        + Number(pt.avg_edge_pct || 0).toFixed(1) + '%.';
+    }
+    $('paperDetail').textContent = paperSummary;
 
     // --- OPPORTUNITIES TABLE ---
     const opps = d.opportunities || [];
     const oppTbody = $('opportunitiesTable').querySelector('tbody');
     if (opps.length === 0) {
-      oppTbody.innerHTML = '<tr><td colspan="5" class="empty-msg">No opportunities with edge right now. The system is watching and will show trades when rules match active markets.</td></tr>';
+      oppTbody.innerHTML = '<tr><td colspan="6" class="empty-msg">No opportunities with edge right now. The system is watching and will show trades when rules match active markets.</td></tr>';
     } else {
       oppTbody.innerHTML = opps.map(o => {
         const sideCls = (o.side || '').toUpperCase() === 'YES' ? 'yes' : 'no';
         const reasons = (o.reasons || []).map(r => esc(r)).join('<br>');
+        const resolves = fmtDate(o.resolves_at);
         return `<tr>
           <td>${esc(o.question)}</td>
           <td class="col-action ${sideCls}">${esc(o.action)}</td>
           <td class="col-edge">${Number(o.edge_pct || 0).toFixed(1)}%</td>
+          <td style="font-size:0.78rem">${resolves}</td>
           <td><span class="tag ${o.confidence === 'High' ? 'green' : o.confidence === 'Medium' ? 'yellow' : 'red'}">${esc(o.confidence || '?')}</span></td>
           <td class="col-why">${reasons}</td>
+        </tr>`;
+      }).join('');
+    }
+
+    // --- ENDING SOONEST TABLE ---
+    const ending = d.ending_soonest || [];
+    const endTbody = $('endingSoonestTable').querySelector('tbody');
+    if (ending.length === 0) {
+      endTbody.innerHTML = '<tr><td colspan="5" class="empty-msg">No trades with known resolution dates yet.</td></tr>';
+    } else {
+      endTbody.innerHTML = ending.map(e => {
+        const sideCls = (e.side || '').toUpperCase() === 'YES' ? 'yes' : 'no';
+        const resolves = fmtDate(e.resolves_at);
+        return `<tr>
+          <td>${esc(e.question)}</td>
+          <td class="col-action ${sideCls}">Buy ${esc(e.side)}</td>
+          <td>$${Number(e.entry_price || 0).toFixed(2)}</td>
+          <td class="col-edge">${Number(e.edge_pct || 0).toFixed(1)}%</td>
+          <td style="font-size:0.78rem;font-weight:600">${resolves}</td>
         </tr>`;
       }).join('');
     }
@@ -355,10 +424,20 @@
       ptContent.innerHTML = `<div class="empty-msg">${esc(pt.explanation)}</div>`;
     } else {
       let html = '';
+      // Stats bar
+      if (pt.open_count > 0) {
+        html += `<div style="display:flex;gap:16px;flex-wrap:wrap;font-size:0.78rem;color:var(--muted);margin-bottom:10px;padding:8px 10px;background:var(--bg-2);border-radius:6px;">`;
+        html += `<span>Total: <strong style="color:var(--fg)">${num(pt.total_unique_open || pt.open_count)}</strong> markets</span>`;
+        html += `<span>Ending today: <strong style="color:var(--yellow)">${pt.ending_today || 0}</strong></span>`;
+        html += `<span>This week: <strong style="color:var(--fg)">${pt.ending_this_week || 0}</strong></span>`;
+        html += `<span>Avg edge: <strong style="color:var(--green)">${Number(pt.avg_edge_pct || 0).toFixed(1)}%</strong></span>`;
+        html += `</div>`;
+      }
       // Open trades
       if (pt.open_trades && pt.open_trades.length > 0) {
-        html += '<div style="font-size:0.78rem;color:var(--muted);margin-bottom:6px;font-weight:600;">OPEN TRADES</div>';
-        html += '<table><thead><tr><th>Market</th><th>Side</th><th>Entry</th><th>Edge</th></tr></thead><tbody>';
+        html += `<div style="font-size:0.78rem;color:var(--muted);margin-bottom:6px;font-weight:600;">OPEN TRADES (${num(pt.total_unique_open || pt.open_count)} unique markets, showing top ${pt.open_trades.length})</div>`;
+        html += '<div style="overflow-x:auto; max-height:500px; overflow-y:auto;">';
+        html += '<table><thead><tr><th style="width:30%">Market</th><th>Side</th><th>Entry</th><th>Edge</th><th>Resolves</th><th style="width:28%">Why</th></tr></thead><tbody>';
         html += pt.open_trades.map(t => {
           const sc = t.side === 'YES' ? 'yes' : 'no';
           return `<tr>
@@ -366,9 +445,16 @@
             <td class="col-action ${sc}">${esc(t.side)}</td>
             <td>$${Number(t.entry_price || 0).toFixed(2)}</td>
             <td class="col-edge">${Number(t.edge_pct || 0).toFixed(1)}%</td>
+            <td style="font-size:0.78rem">${fmtDate(t.resolves_at)}</td>
+            <td class="col-why">${esc(t.rule_reason || '')}</td>
           </tr>`;
         }).join('');
-        html += '</tbody></table>';
+        html += '</tbody></table></div>';
+        // Load more hint
+        const remaining = (pt.total_unique_open || 0) - pt.open_trades.length;
+        if (remaining > 0) {
+          html += `<div style="text-align:center;margin-top:10px;font-size:0.82rem;color:var(--muted);">${num(remaining)} more trades not shown</div>`;
+        }
       }
       // Closed trades
       if (pt.recent_closed && pt.recent_closed.length > 0) {
