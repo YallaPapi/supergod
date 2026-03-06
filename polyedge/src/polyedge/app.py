@@ -11,6 +11,7 @@ from sqlalchemy import select, func, desc, text, case, cast, Numeric
 from polyedge.db import SessionLocal
 from polyedge.analysis.scorer import prediction_metrics_cutoff
 from polyedge.db import settings as db_settings
+from polyedge.query_filters import real_trade_predicates
 from polyedge.models import (
     Market, TradingRule, PaperTrade, DailyFeature,
     NgramStat, Prediction, Factor, FactorWeight, PriceSnapshot, ServiceHeartbeat,
@@ -761,11 +762,7 @@ async def human_dashboard():
             _pt_filter = (
                 select(PaperTrade.id)
                 .join(Market, Market.id == PaperTrade.market_id)
-                .where(
-                    PaperTrade.resolved == True,
-                    PaperTrade.entry_price > 0.02,
-                    ~Market.question.ilike("%up or down%"),
-                )
+                .where(*real_trade_predicates(resolved=True))
             )
             pt_scored = (await session.execute(
                 select(func.count()).select_from(_pt_filter.subquery())
@@ -774,10 +771,8 @@ async def human_dashboard():
                 select(PaperTrade.id)
                 .join(Market, Market.id == PaperTrade.market_id)
                 .where(
-                    PaperTrade.resolved == True,
                     PaperTrade.pnl > 0,
-                    PaperTrade.entry_price > 0.02,
-                    ~Market.question.ilike("%up or down%"),
+                    *real_trade_predicates(resolved=True),
                 )
             )
             pt_correct = (await session.execute(
@@ -811,10 +806,8 @@ async def human_dashboard():
                 select(PaperTrade, Market.question, Market.end_date, Market.volume, TradingRule)
                 .join(Market, Market.id == PaperTrade.market_id)
                 .outerjoin(TradingRule, TradingRule.id == PaperTrade.rule_id)
-                .where(
-                    PaperTrade.resolved == False,
-                    PaperTrade.entry_price > 0.02,
-                )
+                .where(*real_trade_predicates(
+                    now=now, resolved=False, require_future_end=True))
                 .order_by(desc(PaperTrade.edge))
                 .limit(30)
             )).all()
@@ -846,11 +839,8 @@ async def human_dashboard():
             ending_rows = (await session.execute(
                 select(PaperTrade, Market.question, Market.end_date, Market.volume)
                 .join(Market, Market.id == PaperTrade.market_id)
-                .where(
-                    PaperTrade.resolved == False,
-                    Market.end_date != None,
-                    Market.end_date >= now,
-                )
+                .where(*real_trade_predicates(
+                    now=now, resolved=False, require_future_end=True))
                 .order_by(Market.end_date.asc())
                 .limit(100)
             )).all()
@@ -870,6 +860,32 @@ async def human_dashboard():
                     "volume": float(volume or 0),
                 }
             ending_soonest = list(seen_ending.values())[:20]
+
+            # Pre-compute paper trade counts for action-card fallback and summary sections.
+            open_real_preds = real_trade_predicates(
+                now=now, resolved=False, require_future_end=True)
+            resolved_real_preds = real_trade_predicates(resolved=True)
+            open_count = (await session.execute(
+                select(func.count(PaperTrade.id))
+                .join(Market, Market.id == PaperTrade.market_id)
+                .where(*open_real_preds)
+            )).scalar() or 0
+            closed_count = (await session.execute(
+                select(func.count(PaperTrade.id))
+                .join(Market, Market.id == PaperTrade.market_id)
+                .where(*resolved_real_preds)
+            )).scalar() or 0
+            total_pnl = (await session.execute(
+                select(func.sum(PaperTrade.pnl))
+                .join(Market, Market.id == PaperTrade.market_id)
+                .where(*resolved_real_preds)
+            )).scalar() or 0.0
+            wins = (await session.execute(
+                select(func.count(PaperTrade.id))
+                .join(Market, Market.id == PaperTrade.market_id)
+                .where(PaperTrade.won == True, *resolved_real_preds)
+            )).scalar() or 0
+            pt_win_rate = round(wins / closed_count * 100, 1) if closed_count else None
 
             # --- TOP ACTION (best single opportunity) ---
             if opportunities:
@@ -910,34 +926,6 @@ async def human_dashboard():
                     ],
                 }
 
-            # --- PAPER TRADES (exclude junk: "up or down", entry <= $0.02) ---
-            _junk = Market.question.ilike("%up or down%")
-            open_count = (await session.execute(
-                select(func.count(PaperTrade.id))
-                .join(Market, Market.id == PaperTrade.market_id)
-                .where(PaperTrade.resolved == False,
-                       PaperTrade.entry_price > 0.02, ~_junk)
-            )).scalar() or 0
-            closed_count = (await session.execute(
-                select(func.count(PaperTrade.id))
-                .join(Market, Market.id == PaperTrade.market_id)
-                .where(PaperTrade.resolved == True,
-                       PaperTrade.entry_price > 0.02, ~_junk)
-            )).scalar() or 0
-            total_pnl = (await session.execute(
-                select(func.sum(PaperTrade.pnl))
-                .join(Market, Market.id == PaperTrade.market_id)
-                .where(PaperTrade.resolved == True,
-                       PaperTrade.entry_price > 0.02, ~_junk)
-            )).scalar() or 0.0
-            wins = (await session.execute(
-                select(func.count(PaperTrade.id))
-                .join(Market, Market.id == PaperTrade.market_id)
-                .where(PaperTrade.resolved == True, PaperTrade.won == True,
-                       PaperTrade.entry_price > 0.02, ~_junk)
-            )).scalar() or 0
-            pt_win_rate = round(wins / closed_count * 100, 1) if closed_count else None
-
             if open_count == 0 and closed_count == 0:
                 pt_status = "not_started"
                 pt_explanation = (
@@ -961,9 +949,7 @@ async def human_dashboard():
             recent_trades_rows = (await session.execute(
                 select(PaperTrade, Market.question)
                 .join(Market, Market.id == PaperTrade.market_id)
-                .where(PaperTrade.resolved == True,
-                       PaperTrade.entry_price > 0.02,
-                       ~Market.question.ilike("%up or down%"))
+                .where(*resolved_real_preds)
                 .order_by(desc(PaperTrade.resolved_at))
                 .limit(20)
             )).all()
@@ -984,10 +970,7 @@ async def human_dashboard():
                 select(PaperTrade, Market.question, Market.end_date, TradingRule)
                 .join(Market, Market.id == PaperTrade.market_id)
                 .outerjoin(TradingRule, TradingRule.id == PaperTrade.rule_id)
-                .where(
-                    PaperTrade.resolved == False,
-                    PaperTrade.entry_price > 0.02,
-                )
+                .where(*open_real_preds)
                 .order_by(desc(PaperTrade.edge))
             )).all()
             # Group by market_id — keep best edge, attach rule reason
@@ -1025,8 +1008,7 @@ async def human_dashboard():
                 select(func.count(func.distinct(PaperTrade.market_id)))
                 .join(Market, Market.id == PaperTrade.market_id)
                 .where(
-                    PaperTrade.resolved == False,
-                    Market.end_date >= now,
+                    *open_real_preds,
                     Market.end_date < now.replace(hour=23, minute=59, second=59),
                 )
             )).scalar() or 0
@@ -1034,8 +1016,7 @@ async def human_dashboard():
                 select(func.count(func.distinct(PaperTrade.market_id)))
                 .join(Market, Market.id == PaperTrade.market_id)
                 .where(
-                    PaperTrade.resolved == False,
-                    Market.end_date >= now,
+                    *open_real_preds,
                     Market.end_date < now.replace(hour=0, minute=0, second=0) + timedelta(days=7),
                 )
             )).scalar() or 0
@@ -1043,7 +1024,8 @@ async def human_dashboard():
             # Average edge
             avg_edge_raw = (await session.execute(
                 select(func.avg(PaperTrade.edge))
-                .where(PaperTrade.resolved == False, PaperTrade.entry_price > 0.02)
+                .join(Market, Market.id == PaperTrade.market_id)
+                .where(*open_real_preds)
             )).scalar()
             avg_edge_pct = round(float(avg_edge_raw or 0) * 100, 1)
 

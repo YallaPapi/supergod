@@ -1,6 +1,11 @@
 """Tests for the v3 FastAPI app endpoints."""
+from types import SimpleNamespace
+
 from fastapi.testclient import TestClient
-from polyedge.app import app, _prediction_edge_pct, _rule_to_plain_english
+import pytest
+
+import polyedge.app as app_module
+from polyedge.app import app, _prediction_edge_pct, _rule_to_plain_english, human_dashboard
 
 
 def test_stats_endpoint_registered():
@@ -95,6 +100,35 @@ def test_prediction_edge_pct_invalid_input():
 
 def test_human_dashboard_endpoint_registered():
     assert app.url_path_for("human_dashboard") == "/api/human-dashboard"
+
+
+@pytest.mark.asyncio
+async def test_human_dashboard_handles_empty_opportunities_without_unbound_error(monkeypatch):
+    class _Result:
+        def scalar(self):
+            return None
+
+        def scalars(self):
+            return self
+
+        def all(self):
+            return []
+
+    class _Session:
+        async def execute(self, *_args, **_kwargs):
+            return _Result()
+
+    class _SessionCtx:
+        async def __aenter__(self):
+            return _Session()
+
+        async def __aexit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(app_module, "SessionLocal", lambda: _SessionCtx())
+
+    result = await human_dashboard()
+    assert "error" not in result
 
 
 class _FakeRule:
