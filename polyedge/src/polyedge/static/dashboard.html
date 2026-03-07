@@ -477,8 +477,7 @@
     const ptPnl = Number((d.paper_trades || {}).total_pnl || 0);
     const ptScored = hr.paper_trade_scored || 0;
     if (ptScored > 0) {
-      const pnlSign = ptPnl >= 0 ? '+' : '';
-      hrEl.textContent = pnlSign + '$' + Math.abs(ptPnl).toFixed(2);
+      hrEl.textContent = '$' + ptPnl.toFixed(2);
       hrEl.className = 'stat-big ' + (ptPnl > 0 ? 'positive' : ptPnl < 0 ? 'negative' : 'neutral');
     } else if (hr.opportunities_now > 0) {
       hrEl.textContent = hr.opportunities_now + ' edges';
@@ -555,7 +554,7 @@
       let srcHtml = '<div style="margin-top:10px;padding:10px;background:#1a1d25;border-radius:8px;font-size:0.8rem">';
       srcHtml += '<div style="font-weight:600;margin-bottom:6px;color:#e0e0e0">Strategy Comparison (each strategy bets independently)</div>';
       srcHtml += '<table style="width:100%;border-collapse:collapse;font-size:0.78rem">';
-      srcHtml += '<thead><tr style="color:#888;text-align:left"><th></th><th>P&L</th><th>Open</th><th>Closed</th><th>Win Rate</th></tr></thead><tbody>';
+      srcHtml += '<thead><tr style="color:#888;text-align:left"><th></th><th>P&L</th><th>Open Trades</th><th>Open Mkts</th><th>Closed Trades</th><th>Closed Mkts</th><th>Win Rate</th></tr></thead><tbody>';
       for (const key of ['ngram', 'llm', 'combined']) {
         const s = bs[key];
         if (!s) continue;
@@ -566,13 +565,15 @@
           <td style="font-weight:600;padding:3px 6px">${esc(s.label)}</td>
           <td style="padding:3px 6px;color:${pnlColor};font-weight:600">${pnlSign}$${Number(s.pnl || 0).toFixed(2)}</td>
           <td style="padding:3px 6px">${s.open || 0}</td>
+          <td style="padding:3px 6px">${s.unique_markets_open || 0}</td>
           <td style="padding:3px 6px">${s.closed || 0}</td>
+          <td style="padding:3px 6px">${s.unique_markets_closed || 0}</td>
           <td style="padding:3px 6px">${wrText}</td>
         </tr>`;
       }
       srcHtml += '</tbody></table>';
       // Note about overlap
-      srcHtml += '<div style="font-size:0.7rem;color:#666;margin-top:4px;">Multiple strategies may bet on the same market. Unique markets tracked separately above.</div>';
+      srcHtml += '<div style="font-size:0.7rem;color:#666;margin-top:4px;">Trade counts can exceed market counts because a strategy can place both sides or multiple entries over time.</div>';
       srcHtml += '</div>';
       $('paperDetail').innerHTML += srcHtml;
     }

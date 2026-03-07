@@ -826,8 +826,6 @@ async def human_dashboard():
 
             opportunities = []
             for trade, question, end_date, volume, rule in opp_rows:
-                if "up or down" in (question or "").lower():
-                    continue
                 side = trade.side
                 entry = float(trade.entry_price or 0)
                 edge_pct = round(float(trade.edge or 0) * 100, 1)
@@ -866,7 +864,7 @@ async def human_dashboard():
             for trade, question, end_date, volume, rule in ending_rows:
                 mid = trade.market_id
                 q = (question or "?")
-                if mid in seen_ending or "up or down" in q.lower():
+                if mid in seen_ending:
                     continue
                 reason = _rule_to_plain_english(rule) if rule else "Unknown pattern"
                 seen_ending[mid] = {
@@ -1027,9 +1025,6 @@ async def human_dashboard():
             for trade, question, end_date, rule in open_trades_rows:
                 mid = trade.market_id
                 q = (question or "?")
-                # Skip high-frequency noise
-                if "up or down" in q.lower():
-                    continue
                 if mid not in seen_markets:
                     reason = _rule_to_plain_english(rule) if rule else "Unknown pattern"
                     rule_tier = int(rule.tier or 3) if rule else 3
@@ -1146,28 +1141,46 @@ async def human_dashboard():
 
             # --- TRADE SOURCE BREAKDOWN (ngram vs llm vs combined) ---
             source_stats = {}
+            source_open_preds = real_trade_predicates(resolved=False)
+            source_closed_preds = real_trade_predicates(resolved=True)
             for src in ("ngram", "llm", "combined"):
                 src_closed = (await session.execute(
                     select(func.count(PaperTrade.id))
-                    .where(PaperTrade.resolved == True, PaperTrade.trade_source == src)  # noqa: E712
+                    .join(Market, Market.id == PaperTrade.market_id)
+                    .where(PaperTrade.trade_source == src, *source_closed_preds)
                 )).scalar() or 0
                 src_wins = (await session.execute(
                     select(func.count(PaperTrade.id))
-                    .where(PaperTrade.resolved == True, PaperTrade.trade_source == src, PaperTrade.won == True)  # noqa: E712
+                    .join(Market, Market.id == PaperTrade.market_id)
+                    .where(PaperTrade.trade_source == src, PaperTrade.won == True, *source_closed_preds)  # noqa: E712
                 )).scalar() or 0
                 src_pnl = (await session.execute(
                     select(func.sum(PaperTrade.pnl))
-                    .where(PaperTrade.resolved == True, PaperTrade.trade_source == src)  # noqa: E712
+                    .join(Market, Market.id == PaperTrade.market_id)
+                    .where(PaperTrade.trade_source == src, *source_closed_preds)
                 )).scalar() or 0.0
                 src_open = (await session.execute(
                     select(func.count(PaperTrade.id))
-                    .where(PaperTrade.resolved == False, PaperTrade.trade_source == src)  # noqa: E712
+                    .join(Market, Market.id == PaperTrade.market_id)
+                    .where(PaperTrade.trade_source == src, *source_open_preds)
+                )).scalar() or 0
+                src_unique_open = (await session.execute(
+                    select(func.count(func.distinct(PaperTrade.market_id)))
+                    .join(Market, Market.id == PaperTrade.market_id)
+                    .where(PaperTrade.trade_source == src, *source_open_preds)
+                )).scalar() or 0
+                src_unique_closed = (await session.execute(
+                    select(func.count(func.distinct(PaperTrade.market_id)))
+                    .join(Market, Market.id == PaperTrade.market_id)
+                    .where(PaperTrade.trade_source == src, *source_closed_preds)
                 )).scalar() or 0
                 src_wr = round(src_wins / src_closed * 100, 1) if src_closed else None
                 source_stats[src] = {
                     "open": src_open, "closed": src_closed,
                     "wins": src_wins, "win_rate_pct": src_wr,
                     "pnl": round(float(src_pnl), 2),
+                    "unique_markets_open": src_unique_open,
+                    "unique_markets_closed": src_unique_closed,
                 }
 
             # --- DATA FRESHNESS ---
@@ -1311,10 +1324,15 @@ async def human_dashboard():
                     "last_scored_at": last_scored_at,
                     "open_count": all_open,
                     "closed_count": all_closed,
+                    "trade_counts": {"open": all_open, "closed": all_closed},
                     "total_pnl": round(float(all_pnl), 2),
                     "win_rate_pct": all_wr,
                     "unique_markets_open": unique_markets_open,
                     "unique_markets_closed": unique_markets_closed,
+                    "unique_market_counts": {
+                        "open": unique_markets_open,
+                        "closed": unique_markets_closed,
+                    },
                     "open_trades": open_trades_list,
                     "total_unique_open": total_unique_open,
                     "recent_closed": recent_trades,

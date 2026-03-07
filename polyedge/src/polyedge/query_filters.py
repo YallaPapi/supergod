@@ -4,12 +4,17 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from sqlalchemy import or_
+
 from polyedge.models import Market, PaperTrade
 
 
 def noise_market_predicate():
     """Known high-frequency/noise cohort currently excluded from live metrics."""
-    return Market.question.ilike("%up or down%")
+    return or_(
+        Market.market_category == "crypto_updown",
+        Market.question.ilike("%up or down%"),
+    )
 
 
 def real_trade_predicates(

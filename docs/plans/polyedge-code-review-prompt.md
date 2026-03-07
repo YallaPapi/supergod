@@ -181,7 +181,7 @@ python -m pytest tests/ -v
 
 # DB access (from allowed IPs only):
 # psql -h 89.167.99.187 -U polyedge -d polyedge
-# Password: polyedge
+# Credentials: use secure secret storage / environment variables only
 ```
 
 ## Output Format

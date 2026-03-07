@@ -5,7 +5,12 @@ import inspect
 from datetime import datetime
 import pytest
 
-from polyedge.scheduler import run_forever, run_paper_trading, score_paper_trades
+from polyedge.scheduler import (
+    run_forever,
+    run_llm_paper_trading,
+    run_paper_trading,
+    score_paper_trades,
+)
 
 
 def _scalars_result(rows):
@@ -95,4 +100,70 @@ async def test_score_paper_trades_scores_joined_rows():
     assert trade.won is True
     assert trade.pnl == 0.45
     assert trade.resolved is True
+    session.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_score_paper_trades_void_resolution_marks_resolved_without_loss():
+    trade = SimpleNamespace(
+        side="YES",
+        entry_price=0.42,
+        won=None,
+        pnl=None,
+        resolved=False,
+        resolved_at=None,
+    )
+
+    session = AsyncMock()
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=False)
+    session.execute = AsyncMock(return_value=_rows_result([(trade, "CANCELLED")]))
+    session.commit = AsyncMock()
+
+    with patch("polyedge.scheduler.SessionLocal", return_value=session):
+        with patch("polyedge.scheduler._utcnow_naive", return_value=datetime(2026, 1, 1, 0, 0, 0)):
+            with patch("polyedge.trading.pnl.calc_pnl") as calc_mock:
+                await score_paper_trades()
+
+    calc_mock.assert_not_called()
+    assert trade.won is None
+    assert trade.pnl == 0.0
+    assert trade.resolved is True
+    session.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_run_llm_paper_trading_skips_crypto_updown_markets():
+    session = AsyncMock()
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=False)
+    session.add = MagicMock()
+    session.commit = AsyncMock()
+
+    pred = SimpleNamespace(
+        id="p1",
+        market_id="m1",
+        predicted_outcome="YES",
+        confidence=0.9,
+    )
+    market = SimpleNamespace(
+        id="m1",
+        active=True,
+        end_date=datetime(2026, 1, 1, 1, 0, 0),
+        yes_price=0.3,
+        no_price=0.7,
+        question="Will BTC go up or down in the next 5 minutes?",
+        market_category="crypto_updown",
+    )
+
+    session.execute = AsyncMock(side_effect=[
+        _rows_result([(pred, market)]),  # prediction rows
+        _rows_result([]),                # existing open llm trades
+    ])
+
+    with patch("polyedge.scheduler.SessionLocal", return_value=session):
+        with patch("polyedge.scheduler._utcnow_naive", return_value=datetime(2026, 1, 1, 0, 0, 0)):
+            await run_llm_paper_trading()
+
+    session.add.assert_not_called()
     session.commit.assert_awaited_once()

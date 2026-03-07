@@ -56,6 +56,28 @@ def _scheduler_host_allowed() -> bool:
     return True
 
 
+def _is_noise_market(market) -> bool:
+    """Return True for high-frequency crypto up/down markets."""
+    market_category = (getattr(market, "market_category", "") or "").strip().lower()
+    if market_category == "crypto_updown":
+        return True
+    q_lower = (getattr(market, "question", "") or "").lower()
+    return "up or down" in q_lower
+
+
+async def _safe_commit(session, *, loop_name: str) -> bool:
+    """Commit and gracefully handle duplicate-open-trade races."""
+    from sqlalchemy.exc import IntegrityError
+
+    try:
+        await session.commit()
+        return True
+    except IntegrityError as exc:
+        await session.rollback()
+        log.warning("%s commit conflict (likely duplicate open trade): %s", loop_name, exc)
+        return False
+
+
 # ============================================================
 # EXISTING LOOPS (keep working)
 # ============================================================
@@ -214,7 +236,7 @@ async def run_paper_trading():
             q_lower = (market.question or "").lower()
 
             # Skip high-frequency noise markets (5-min crypto predictions etc.)
-            if "up or down" in q_lower:
+            if _is_noise_market(market):
                 skipped_noise += 1
                 continue
 
@@ -269,13 +291,14 @@ async def run_paper_trading():
 
             # Commit in batches so dashboard sees results immediately
             if batch_pending >= 100:
-                await session.commit()
+                await _safe_commit(session, loop_name="paper_trading")
                 log.info("Paper trading: %d new trades so far (%d/%d markets)",
                          trades_opened, i + 1, len(markets))
                 batch_pending = 0
 
-        if batch_pending > 0:
-            await session.commit()
+        # Keep session state clean even on no-op cycles.
+        if batch_pending > 0 or trades_opened == 0:
+            await _safe_commit(session, loop_name="paper_trading")
 
     log.info(
         "Paper trading complete: %d new trades from %d markets (skipped %d noise, %d expired)",
@@ -303,14 +326,20 @@ async def score_paper_trades():
 
         scored = 0
         for trade, resolution in rows:
-            won = (str(resolution).upper() == trade.side)
-            trade.won = won
-            trade.pnl = calc_pnl(trade.entry_price, won)
+            normalized = str(resolution or "").upper().strip()
+            if normalized in ("YES", "NO"):
+                won = (normalized == trade.side)
+                trade.won = won
+                trade.pnl = calc_pnl(trade.entry_price, won)
+            else:
+                # Non-binary outcomes (e.g. CANCELLED/N/A) are void for PnL accounting.
+                trade.won = None
+                trade.pnl = 0.0
             trade.resolved = True
             trade.resolved_at = _utcnow_naive()
             scored += 1
 
-        await session.commit()
+        await _safe_commit(session, loop_name="score_paper_trades")
 
     if scored:
         log.info("Scored %d paper trades", scored)
@@ -360,7 +389,7 @@ async def run_llm_paper_trading():
     - Market ends within 48h
     """
     from polyedge.models import Market, Prediction, PaperTrade
-    from sqlalchemy import select, func
+    from sqlalchemy import func, select
 
     MIN_CONFIDENCE = 0.15  # conviction threshold (top ~25% of predictions)
     MAX_ENTRY_PRICE = 0.50  # risk/reward filter (win >= loss)
@@ -368,22 +397,29 @@ async def run_llm_paper_trading():
     max_end = now + timedelta(hours=48)
 
     async with SessionLocal() as session:
-        # Get the most recent prediction per market (subquery)
-        latest_pred = (
+        # Get the most recent prediction per market by created_at (tie-break on id).
+        latest_pred_ranked = (
             select(
+                Prediction.id.label("prediction_id"),
                 Prediction.market_id,
-                func.max(Prediction.id).label("latest_id"),
+                func.row_number().over(
+                    partition_by=Prediction.market_id,
+                    order_by=(Prediction.created_at.desc(), Prediction.id.desc()),
+                ).label("rn"),
             )
-            .group_by(Prediction.market_id)
             .subquery()
         )
 
         # Join to get full prediction rows for markets ending within 48h
         pred_rows = (await session.execute(
             select(Prediction, Market)
-            .join(latest_pred, Prediction.id == latest_pred.c.latest_id)
+            .join(
+                latest_pred_ranked,
+                Prediction.id == latest_pred_ranked.c.prediction_id,
+            )
             .join(Market, Market.id == Prediction.market_id)
             .where(
+                latest_pred_ranked.c.rn == 1,
                 Market.active == True,  # noqa: E712
                 Market.end_date.is_not(None),
                 Market.end_date > now,
@@ -407,6 +443,9 @@ async def run_llm_paper_trading():
 
         trades_opened = 0
         for pred, market in pred_rows:
+            if _is_noise_market(market):
+                continue
+
             side = (pred.predicted_outcome or "").upper()
             if side not in ("YES", "NO"):
                 continue
@@ -445,7 +484,7 @@ async def run_llm_paper_trading():
                 rule_id=None,
                 side=side,
                 entry_price=entry,
-                edge=pred.confidence,  # store conviction as edge for tracking
+                edge=edge,
                 bet_size=1.0,
                 trade_source="llm",
                 resolved=False,
@@ -454,7 +493,7 @@ async def run_llm_paper_trading():
             existing.add(trade_key)
             trades_opened += 1
 
-        await session.commit()
+        await _safe_commit(session, loop_name="llm_paper_trading")
 
     log.info("LLM paper trading: %d new trades from %d predictions", trades_opened, len(pred_rows))
 
@@ -467,8 +506,8 @@ async def run_combined_paper_trading():
     2. An LLM prediction with edge >= 10%
     If both exist and predict the SAME side, opens a combined trade.
     """
-    from polyedge.models import Market, TradingRule, Prediction, PaperTrade
-    from sqlalchemy import select, func
+    from polyedge.models import Market, PaperTrade, Prediction, TradingRule
+    from sqlalchemy import func, select
 
     MIN_NGRAM_EDGE = 0.05
     now = _utcnow_naive()
@@ -518,20 +557,27 @@ async def run_combined_paper_trading():
             log.info("Combined paper trading: no markets ending within 48h")
             return
 
-        # Load latest predictions keyed by market_id
+        # Load latest predictions keyed by market_id (latest by created_at).
         market_ids = [m.id for m in markets]
-        latest_pred = (
+        latest_pred_ranked = (
             select(
+                Prediction.id.label("prediction_id"),
                 Prediction.market_id,
-                func.max(Prediction.id).label("latest_id"),
+                func.row_number().over(
+                    partition_by=Prediction.market_id,
+                    order_by=(Prediction.created_at.desc(), Prediction.id.desc()),
+                ).label("rn"),
             )
             .where(Prediction.market_id.in_(market_ids))
-            .group_by(Prediction.market_id)
             .subquery()
         )
         pred_rows = (await session.execute(
             select(Prediction)
-            .join(latest_pred, Prediction.id == latest_pred.c.latest_id)
+            .join(
+                latest_pred_ranked,
+                Prediction.id == latest_pred_ranked.c.prediction_id,
+            )
+            .where(latest_pred_ranked.c.rn == 1)
         )).scalars().all()
         preds_by_market: dict[str, Prediction] = {p.market_id: p for p in pred_rows}
 
@@ -548,7 +594,7 @@ async def run_combined_paper_trading():
         trades_opened = 0
         for market in markets:
             q_lower = (market.question or "").lower()
-            if "up or down" in q_lower:
+            if _is_noise_market(market):
                 continue
 
             yes_price = float(market.yes_price or 0.5)
@@ -609,7 +655,7 @@ async def run_combined_paper_trading():
             existing.add(trade_key)
             trades_opened += 1
 
-        await session.commit()
+        await _safe_commit(session, loop_name="combined_paper_trading")
 
     log.info("Combined paper trading: %d new trades", trades_opened)
 

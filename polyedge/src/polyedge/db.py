@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     perplexity_api_key: str = ""
     grok_api_key: str = ""
     prediction_metrics_cutoff: str = ""
+    prediction_resolution_sources: str = "polymarket_api"
     supergod_orchestrator_url: str = "ws://89.167.99.187:8080/ws/client"
     supergod_repo_path: str = "/opt/polyedge"
     research_market_limit: int = 25

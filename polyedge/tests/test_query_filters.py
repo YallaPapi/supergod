@@ -22,6 +22,7 @@ def test_real_trade_predicates_include_core_filters():
 
     assert "paper_trades.entry_price > 0.02" in sql
     assert "up or down" in sql
+    assert "markets.market_category = 'crypto_updown'" in sql
     assert "paper_trades.resolved = false" in sql
     assert "markets.end_date >=" in sql
 
