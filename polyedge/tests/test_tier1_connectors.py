@@ -16,32 +16,16 @@ from polyedge.data.connectors.wikipedia_connector import WikipediaConnector
 from polyedge.data.connectors.hackernews_connector import HackerNewsConnector
 from polyedge.data.connectors.reddit_connector import RedditConnector
 
-# Save a snapshot of registered connectors after all imports
-_REGISTERED = list(registry._CONNECTORS)
-
-
-# ---- Fixtures ----
-
-@pytest.fixture(autouse=True)
-def _restore_registry():
-    """Restore registry to the known-good state for each test."""
-    registry._CONNECTORS.clear()
-    registry._CONNECTORS.extend(_REGISTERED)
-    yield
-    registry._CONNECTORS.clear()
-    registry._CONNECTORS.extend(_REGISTERED)
-
-
 # ---- 1. All 8 connectors importable and registered ----
 
 def test_all_eight_connectors_registered():
     connectors = registry.get_all_connectors()
-    sources = sorted(c.source for c in connectors)
-    expected = sorted([
+    sources = {c.source for c in connectors}
+    expected = {
         "calendar", "yfinance", "coingecko", "open_meteo",
         "usgs", "wikipedia", "hackernews", "reddit",
-    ])
-    assert sources == expected, f"Expected {expected}, got {sources}"
+    }
+    assert expected.issubset(sources), f"Missing tier 1 connectors: {expected - sources}"
 
 
 def test_all_connectors_are_base_connector_subclass():
@@ -161,9 +145,11 @@ def test_all_connectors_have_source_and_category():
 
 
 def test_all_tier1_connectors_require_no_key():
+    tier1_sources = {"calendar", "yfinance", "coingecko", "open_meteo", "usgs", "wikipedia", "hackernews", "reddit"}
     for c in registry.get_all_connectors():
-        assert c.requires_key is False, f"{c.source} should not require an API key"
-        assert c.is_available() is True
+        if c.source in tier1_sources:
+            assert c.requires_key is False, f"{c.source} should not require an API key"
+            assert c.is_available() is True
 
 
 # ---- 9. Calendar leap year ----

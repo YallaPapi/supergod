@@ -140,7 +140,7 @@
 <div class="section">
   <div class="panel">
     <div class="panel-title">Resolution Schedule <span id="scheduleTotal" style="font-size:0.85rem;color:#999;font-weight:400"></span></div>
-    <div class="panel-explain">How many paper trades resolve each hour over the next 48h. Times shown in your local timezone.</div>
+    <div class="panel-explain">How many paper trades resolve each hour over the next 48h. <span id="scheduleTimezone" style="font-weight:600;color:#58a6ff"></span></div>
     <div id="resolutionSchedule" style="display:flex;flex-wrap:wrap;gap:4px;margin-top:8px;">
       <span class="empty-msg">Loading...</span>
     </div>
@@ -173,18 +173,27 @@
   <div class="panel">
     <div class="panel-title">Recently Resolved <span id="resolvedCount" style="font-size:0.85rem;color:#999;font-weight:400"></span></div>
     <div class="panel-explain">Trades that just settled — wins and losses as they happen.</div>
+    <div id="resolvedFilters" style="display:none;margin-bottom:8px;display:flex;gap:6px;flex-wrap:wrap;">
+      <button class="resolved-filter active" data-filter="all" onclick="filterResolved('all')" style="background:#3a3d45;color:#e0e0e0;border:1px solid #555;border-radius:4px;padding:4px 12px;cursor:pointer;font-size:0.75rem;font-weight:600;">All</button>
+      <button class="resolved-filter" data-filter="crypto" onclick="filterResolved('crypto')" style="background:#2a2d35;color:#b0b8c8;border:1px solid #3a3d45;border-radius:4px;padding:4px 12px;cursor:pointer;font-size:0.75rem;">Crypto Up/Down</button>
+      <button class="resolved-filter" data-filter="non-crypto" onclick="filterResolved('non-crypto')" style="background:#2a2d35;color:#b0b8c8;border:1px solid #3a3d45;border-radius:4px;padding:4px 12px;cursor:pointer;font-size:0.75rem;">Non-Crypto</button>
+      <button class="resolved-filter" data-filter="sports" onclick="filterResolved('sports')" style="background:#2a2d35;color:#b0b8c8;border:1px solid #3a3d45;border-radius:4px;padding:4px 12px;cursor:pointer;font-size:0.75rem;">Sports</button>
+      <button class="resolved-filter" data-filter="politics" onclick="filterResolved('politics')" style="background:#2a2d35;color:#b0b8c8;border:1px solid #3a3d45;border-radius:4px;padding:4px 12px;cursor:pointer;font-size:0.75rem;">Politics</button>
+    </div>
+    <div id="resolvedFilterStats" style="display:none;font-size:0.75rem;color:#999;margin-bottom:6px;"></div>
     <div id="resolvedTableWrap" style="overflow-x:auto; max-height: 350px; overflow-y: auto;">
       <table id="recentResolvedTable">
         <thead><tr>
-          <th style="width:35%">Market</th>
+          <th style="width:30%">Market</th>
           <th>Side</th>
           <th>Entry</th>
           <th>Result</th>
           <th>P&L</th>
           <th>Source</th>
+          <th>Category</th>
           <th>Resolved</th>
         </tr></thead>
-        <tbody><tr><td colspan="7" class="empty-msg">Loading...</td></tr></tbody>
+        <tbody><tr><td colspan="8" class="empty-msg">Loading...</td></tr></tbody>
       </table>
     </div>
     <div style="text-align:center;margin-top:6px;">
@@ -309,6 +318,18 @@
     } catch(e) { return 'TBD'; }
   }
 
+  const catColors = {
+    crypto_updown:'#f0b429', sports_ou:'#e74c3c', sports_spread:'#e67e22', sports_props:'#d35400',
+    sports_winner:'#c0392b', economics:'#27ae60', politics_us:'#3498db', politics_intl:'#2980b9',
+    entertainment:'#9b59b6', crypto_other:'#f39c12', science_tech:'#1abc9c', other:'#7f8c8d'
+  };
+  function catGroup(cat) {
+    if (!cat) return 'other';
+    if (cat === 'crypto_updown') return 'crypto';
+    if (cat.startsWith('sports')) return 'sports';
+    if (cat.startsWith('politics')) return 'politics';
+    return 'non-crypto';
+  }
   function renderResolvedRows(rows) {
     const tbody = $('recentResolvedTable').querySelector('tbody');
     const srcColors = {ngram:'#4a9eff', llm:'#6c5ce7', combined:'#00b894'};
@@ -320,6 +341,9 @@
       const pnlSign = pnlVal >= 0 ? '+' : '';
       const src = t.source || 'ngram';
       const srcColor = srcColors[src] || '#888';
+      const cat = t.category || 'other';
+      const cc = catColors[cat] || '#7f8c8d';
+      const catLabel = (cat || 'other').replace(/_/g, ' ');
       return `<tr>
         <td>${esc(t.question)}</td>
         <td class="col-action ${t.side === 'YES' ? 'yes' : 'no'}">${esc(t.side)}</td>
@@ -327,25 +351,67 @@
         <td class="col-pnl ${resultCls}">${result}</td>
         <td class="col-pnl ${pnlCls}">${pnlSign}$${Math.abs(pnlVal).toFixed(2)}</td>
         <td><span style="font-size:0.7rem;padding:2px 6px;border-radius:4px;background:${srcColor}22;color:${srcColor};font-weight:600">${src.toUpperCase()}</span></td>
+        <td><span style="font-size:0.68rem;padding:2px 6px;border-radius:4px;background:${cc}22;color:${cc};font-weight:600;white-space:nowrap">${catLabel}</span></td>
         <td style="font-size:0.78rem">${fmtDateTime(t.resolved_at)}</td>
       </tr>`;
     }).join('');
   }
-  function toggleResolvedExpand() {
+  window._resolvedFilter = 'all';
+  function getFilteredResolved() {
     const all = window._resolvedAll || [];
+    const f = window._resolvedFilter;
+    if (f === 'all') return all;
+    if (f === 'crypto') return all.filter(t => t.category === 'crypto_updown');
+    if (f === 'non-crypto') return all.filter(t => t.category !== 'crypto_updown');
+    if (f === 'sports') return all.filter(t => (t.category || '').startsWith('sports'));
+    if (f === 'politics') return all.filter(t => (t.category || '').startsWith('politics'));
+    return all;
+  }
+  function updateResolvedView() {
+    const filtered = getFilteredResolved();
     const btn = $('resolvedShowMore');
     const wrap = $('resolvedTableWrap');
-    window._resolvedExpanded = !window._resolvedExpanded;
+    const statsEl = $('resolvedFilterStats');
+    // Compute stats for filtered set
+    const wins = filtered.filter(t => t.won).length;
+    const pnl = filtered.reduce((s, t) => s + Number(t.pnl || 0), 0);
+    const wr = filtered.length > 0 ? (wins / filtered.length * 100).toFixed(1) : '0';
+    const pnlColor = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+    const pnlSign = pnl >= 0 ? '+' : '';
+    statsEl.style.display = filtered.length > 0 ? '' : 'none';
+    statsEl.innerHTML = `Showing ${filtered.length} trades | Win rate: ${wr}% | P&L: <span style="color:${pnlColor}">${pnlSign}$${Math.abs(pnl).toFixed(2)}</span>`;
+
     if (window._resolvedExpanded) {
-      renderResolvedRows(all);
-      wrap.style.maxHeight = '800px';
+      renderResolvedRows(filtered);
+      wrap.style.maxHeight = '2000px';
       btn.textContent = 'Show Less';
     } else {
-      renderResolvedRows(all.slice(0, 20));
+      renderResolvedRows(filtered.slice(0, 20));
       wrap.style.maxHeight = '350px';
-      btn.textContent = `Show All ${all.length}`;
+      btn.textContent = filtered.length > 20 ? `Show All ${filtered.length}` : '';
+      btn.style.display = filtered.length > 20 ? '' : 'none';
     }
   }
+  window.filterResolved = function(filter) {
+    window._resolvedFilter = filter;
+    // Update button styles
+    document.querySelectorAll('.resolved-filter').forEach(btn => {
+      if (btn.dataset.filter === filter) {
+        btn.style.background = '#3a3d45';
+        btn.style.color = '#e0e0e0';
+        btn.style.borderColor = '#555';
+      } else {
+        btn.style.background = '#2a2d35';
+        btn.style.color = '#b0b8c8';
+        btn.style.borderColor = '#3a3d45';
+      }
+    });
+    updateResolvedView();
+  };
+  window.toggleResolvedExpand = function() {
+    window._resolvedExpanded = !window._resolvedExpanded;
+    updateResolvedView();
+  };
 
   async function fetchJSON(url) {
     try {
@@ -405,22 +471,28 @@
       reasonsEl.innerHTML = '';
     }
 
-    // --- HIT RATE ---
+    // --- ARE WE MAKING MONEY? (PnL primary, win rate secondary) ---
     const hr = d.hit_rate || {};
     const hrEl = $('hitRateValue');
-    if (hr.paper_trade_pct != null) {
-      // We have paper trade results - show them
-      hrEl.textContent = hr.paper_trade_pct.toFixed(1) + '%';
-      hrEl.className = 'stat-big ' + (hr.paper_trade_pct >= 55 ? 'positive' : hr.paper_trade_pct >= 45 ? 'neutral' : 'negative');
+    const ptPnl = Number((d.paper_trades || {}).total_pnl || 0);
+    const ptScored = hr.paper_trade_scored || 0;
+    if (ptScored > 0) {
+      const pnlSign = ptPnl >= 0 ? '+' : '';
+      hrEl.textContent = pnlSign + '$' + Math.abs(ptPnl).toFixed(2);
+      hrEl.className = 'stat-big ' + (ptPnl > 0 ? 'positive' : ptPnl < 0 ? 'negative' : 'neutral');
     } else if (hr.opportunities_now > 0) {
-      // No paper trades yet but we have opportunities
       hrEl.textContent = hr.opportunities_now + ' edges';
       hrEl.className = 'stat-big positive';
     } else {
       hrEl.textContent = 'Waiting';
       hrEl.className = 'stat-big neutral';
     }
-    $('hitRateDetail').textContent = hr.explanation || '';
+    const wrText = hr.paper_trade_pct != null ? `Win rate: ${hr.paper_trade_pct.toFixed(1)}%` : '';
+    const uniqueOpen = (d.paper_trades || {}).unique_markets_open || 0;
+    const uniqueClosed = (d.paper_trades || {}).unique_markets_closed || 0;
+    $('hitRateDetail').innerHTML = ptScored > 0
+      ? `${ptScored.toLocaleString()} trades scored | ${wrText}<br>${uniqueOpen.toLocaleString()} markets open, ${uniqueClosed.toLocaleString()} resolved`
+      : hr.explanation || '';
 
     // --- FRESHNESS ---
     const fr = d.data_freshness || {};
@@ -465,16 +537,11 @@
       const comb = co.combined || {};
       const cry = co.crypto || {};
       const oth = co.other || {};
-      // Update hero card value to show combined PnL
-      if (comb.closed > 0) {
-        ptEl.textContent = '$' + Number(comb.pnl || 0).toFixed(2);
-        ptEl.className = 'stat-big ' + (comb.pnl >= 0 ? 'positive' : 'negative');
-      }
       function cohortLine(c) {
-        const wr = c.win_rate_pct != null ? c.win_rate_pct + '% WR' : 'no results';
         const pnlColor = (c.pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)';
         const pnlSign = (c.pnl || 0) >= 0 ? '+' : '';
-        return `<strong>${esc(c.label)}</strong>: ${c.open || 0} open, ${c.closed || 0} closed, ${wr}, <span style="color:${pnlColor}">${pnlSign}$${Number(c.pnl || 0).toFixed(2)}</span>`;
+        const wrText = c.win_rate_pct != null ? `, ${c.win_rate_pct}% WR` : '';
+        return `<strong>${esc(c.label)}</strong>: <span style="color:${pnlColor}">${pnlSign}$${Number(c.pnl || 0).toFixed(2)}</span> (${c.closed || 0} resolved${wrText})`;
       }
       $('paperDetail').innerHTML += '<div style="margin-top:6px;font-size:0.78rem;line-height:1.7;color:var(--muted)">'
         + cohortLine(comb) + '<br>'
@@ -482,13 +549,13 @@
         + cohortLine(oth)
         + '</div>';
     }
-    // Show trade source experiment breakdown (ngram vs llm vs combined)
+    // Show trade source experiment breakdown (ngram vs llm vs combined) — PnL first
     const bs = pt.by_source;
     if (bs) {
       let srcHtml = '<div style="margin-top:10px;padding:10px;background:#1a1d25;border-radius:8px;font-size:0.8rem">';
-      srcHtml += '<div style="font-weight:600;margin-bottom:6px;color:#e0e0e0">Experiment Comparison</div>';
+      srcHtml += '<div style="font-weight:600;margin-bottom:6px;color:#e0e0e0">Strategy Comparison (each strategy bets independently)</div>';
       srcHtml += '<table style="width:100%;border-collapse:collapse;font-size:0.78rem">';
-      srcHtml += '<thead><tr style="color:#888;text-align:left"><th></th><th>Open</th><th>Closed</th><th>Win Rate</th><th>P&L</th></tr></thead><tbody>';
+      srcHtml += '<thead><tr style="color:#888;text-align:left"><th></th><th>P&L</th><th>Open</th><th>Closed</th><th>Win Rate</th></tr></thead><tbody>';
       for (const key of ['ngram', 'llm', 'combined']) {
         const s = bs[key];
         if (!s) continue;
@@ -497,13 +564,16 @@
         const wrText = s.win_rate_pct != null ? s.win_rate_pct + '%' : '-';
         srcHtml += `<tr>
           <td style="font-weight:600;padding:3px 6px">${esc(s.label)}</td>
+          <td style="padding:3px 6px;color:${pnlColor};font-weight:600">${pnlSign}$${Number(s.pnl || 0).toFixed(2)}</td>
           <td style="padding:3px 6px">${s.open || 0}</td>
           <td style="padding:3px 6px">${s.closed || 0}</td>
           <td style="padding:3px 6px">${wrText}</td>
-          <td style="padding:3px 6px;color:${pnlColor}">${pnlSign}$${Number(s.pnl || 0).toFixed(2)}</td>
         </tr>`;
       }
-      srcHtml += '</tbody></table></div>';
+      srcHtml += '</tbody></table>';
+      // Note about overlap
+      srcHtml += '<div style="font-size:0.7rem;color:#666;margin-top:4px;">Multiple strategies may bet on the same market. Unique markets tracked separately above.</div>';
+      srcHtml += '</div>';
       $('paperDetail').innerHTML += srcHtml;
     }
 
@@ -530,26 +600,30 @@
 
     // --- RECENTLY RESOLVED TABLE ---
     const closed = pt.recent_closed || [];
-    window._resolvedAll = closed;  // stash for expand
+    window._resolvedAll = closed;  // stash for expand/filter
     window._resolvedExpanded = false;
-    const resolvedTbody = $('recentResolvedTable').querySelector('tbody');
     const resolvedCountEl = $('resolvedCount');
-    const showMoreBtn = $('resolvedShowMore');
+    const filtersEl = $('resolvedFilters');
     if (closed.length === 0) {
-      resolvedTbody.innerHTML = '<tr><td colspan="7" class="empty-msg">No trades have resolved yet.</td></tr>';
+      $('recentResolvedTable').querySelector('tbody').innerHTML = '<tr><td colspan="8" class="empty-msg">No trades have resolved yet.</td></tr>';
       resolvedCountEl.textContent = '';
-      showMoreBtn.style.display = 'none';
+      filtersEl.style.display = 'none';
+      $('resolvedShowMore').style.display = 'none';
     } else {
       resolvedCountEl.textContent = `(${closed.length} most recent)`;
-      renderResolvedRows(closed.slice(0, 20));
-      showMoreBtn.style.display = closed.length > 20 ? '' : 'none';
-      showMoreBtn.textContent = `Show All ${closed.length}`;
+      filtersEl.style.display = 'flex';
+      updateResolvedView();
     }
 
     // --- RESOLUTION SCHEDULE ---
     const schedule = pt.resolution_schedule || [];
     const schedEl = $('resolutionSchedule');
     const schedTotal = $('scheduleTotal');
+    // Show timezone name
+    try {
+      const tzName = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      $('scheduleTimezone').textContent = `Times shown in ${tzName}.`;
+    } catch(e) { $('scheduleTimezone').textContent = 'Times in your local timezone.'; }
     if (schedule.length === 0) {
       schedEl.innerHTML = '<span class="empty-msg">No upcoming resolutions.</span>';
       schedTotal.textContent = '';

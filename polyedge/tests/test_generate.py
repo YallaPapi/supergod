@@ -1,157 +1,131 @@
-"""Tests for prediction generation with dedupe logic."""
+"""Tests for prediction generation."""
 
-import json
-from datetime import datetime, timedelta
-from unittest.mock import AsyncMock, patch, MagicMock
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from polyedge.analysis.generate import generate_all_predictions
-from polyedge.models import Market, Factor, Prediction, FactorWeight
+from polyedge.analysis.generate import _predict_from_factors, generate_all_predictions
 
 
-def _make_market(market_id="mkt-001", question="Will X happen?", yes_price=0.6):
-    m = MagicMock(spec=Market)
-    m.id = market_id
-    m.question = question
-    m.yes_price = yes_price
-    m.active = True
-    return m
+def _scalars_result(rows):
+    result = MagicMock()
+    scalars = MagicMock()
+    scalars.all.return_value = rows
+    result.scalars.return_value = scalars
+    return result
 
 
-def _make_prediction_result():
-    return {"predicted_outcome": "YES", "confidence": 0.7, "factor_categories": ["financial"]}
-
-
-class FakeScalarsAll:
-    """Helper to simulate session.execute(...).scalars().all() chains."""
-
-    def __init__(self, items):
-        self._items = items
-
-    def all(self):
-        return self._items
-
-
-class FakeResult:
-    def __init__(self, items=None, scalar_value=None):
-        self._items = items or []
-        self._scalar_value = scalar_value
-
-    def scalars(self):
-        return FakeScalarsAll(self._items)
-
-    def scalar(self):
-        return self._scalar_value
-
-
-class FakeSession:
-    """Async context manager that tracks adds and commits."""
-
-    def __init__(self, execute_results):
-        self._execute_results = list(execute_results)
-        self._call_idx = 0
-        self.added = []
-        self.committed = False
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *args):
-        pass
-
-    async def execute(self, stmt):
-        result = self._execute_results[self._call_idx]
-        self._call_idx += 1
-        return result
-
-    def add(self, obj):
-        self.added.append(obj)
-
-    async def commit(self):
-        self.committed = True
+def _scalar_one_result(row):
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = row
+    return result
 
 
 @pytest.mark.asyncio
-@patch("polyedge.analysis.generate.make_prediction", return_value=_make_prediction_result())
-@patch("polyedge.analysis.generate.SessionLocal")
-async def test_generates_prediction_for_market_without_recent(mock_session_local, mock_predict):
-    """A market with no recent predictions should get a new prediction."""
-    market = _make_market()
+async def test_generate_creates_prediction_when_market_has_factors_and_no_recent_prediction():
+    session = AsyncMock()
+    session.add = MagicMock()
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=False)
 
-    # execute order: weights, markets, dedupe count, market_factors
-    session = FakeSession([
-        FakeResult(items=[]),           # FactorWeight query
-        FakeResult(items=[market]),     # Market query
-        FakeResult(scalar_value=0),    # dedupe count = 0 (no recent prediction)
-        FakeResult(items=[]),           # market-specific factors
+    market = SimpleNamespace(id="m1", yes_price=0.55, active=True)
+    factor = SimpleNamespace(
+        id="f1",
+        category="weather",
+        value="storm",
+        confidence=0.8,
+        market_id="m1",
+    )
+    weight = SimpleNamespace(category="weather", weight=1.5)
+
+    session.execute = AsyncMock(side_effect=[
+        _scalars_result([weight]),
+        _scalars_result([market]),
+        _scalars_result([]),
+        _scalars_result([factor]),
     ])
-    # Also need global factors result inserted at the right spot
-    # Actual order: weights, markets, global_factors, then per-market: dedupe, market_factors
-    session._execute_results = [
-        FakeResult(items=[]),           # FactorWeight query
-        FakeResult(items=[market]),     # Market query
-        FakeResult(items=[]),           # global factors
-        FakeResult(scalar_value=0),    # dedupe count = 0
-        FakeResult(items=[]),           # market-specific factors
+
+    with patch("polyedge.analysis.generate.SessionLocal", return_value=session):
+        created = await generate_all_predictions(cooldown_minutes=60)
+
+    assert created == 1
+    session.add.assert_called_once()
+    added = session.add.call_args[0][0]
+    assert added.market_id == "m1"
+    assert added.factor_categories
+    session.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_generate_skips_market_when_recent_prediction_exists():
+    session = AsyncMock()
+    session.add = MagicMock()
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=False)
+
+    market = SimpleNamespace(id="m1", yes_price=0.55, active=True)
+    recent_prediction = SimpleNamespace(
+        created_at=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=5)
+    )
+
+    session.execute = AsyncMock(side_effect=[
+        _scalars_result([]),
+        _scalars_result([market]),
+        _scalars_result([market.id]),
+        _scalars_result([]),
+    ])
+
+    with patch("polyedge.analysis.generate.SessionLocal", return_value=session):
+        created = await generate_all_predictions(cooldown_minutes=60)
+
+    assert created == 0
+    session.add.assert_not_called()
+    session.commit.assert_awaited_once()
+
+
+def test_predict_from_factors_neutral_values_do_not_bias_yes_direction():
+    factors = [
+        SimpleNamespace(id=f"f{i}", category="Social media", value="neutral", confidence=0.95)
+        for i in range(5)
     ]
-    session._call_idx = 0
-
-    mock_session_local.return_value = session
-
-    await generate_all_predictions()
-
-    assert session.committed
-    assert len(session.added) == 1, f"Expected 1 prediction, got {len(session.added)}"
-
-
-@pytest.mark.asyncio
-@patch("polyedge.analysis.generate.make_prediction", return_value=_make_prediction_result())
-@patch("polyedge.analysis.generate.SessionLocal")
-async def test_skips_market_with_recent_prediction(mock_session_local, mock_predict):
-    """A market predicted less than 1 hour ago should be skipped."""
-    market = _make_market()
-
-    session = FakeSession([
-        FakeResult(items=[]),           # FactorWeight query
-        FakeResult(items=[market]),     # Market query
-        FakeResult(items=[]),           # global factors
-        FakeResult(scalar_value=1),    # dedupe count = 1 (recent prediction exists)
-    ])
-    mock_session_local.return_value = session
-
-    await generate_all_predictions()
-
-    assert session.committed
-    assert len(session.added) == 0, "Should not add prediction for recently-predicted market"
-    mock_predict.assert_not_called()
+    signal = _predict_from_factors(
+        factors=factors,
+        market_yes_price=0.2,
+        weights={"social media": 1.0},
+    )
+    # With neutral evidence, prediction should stay aligned with prior (< 0.5 => NO side).
+    assert signal["predicted_outcome"] == "NO"
 
 
-@pytest.mark.asyncio
-@patch("polyedge.analysis.generate.make_prediction", return_value=_make_prediction_result())
-@patch("polyedge.analysis.generate.SessionLocal")
-async def test_mixed_markets_dedupe(mock_session_local, mock_predict):
-    """With two markets, one recent and one not, only the stale one gets a prediction."""
-    market_a = _make_market(market_id="mkt-a")
-    market_b = _make_market(market_id="mkt-b")
+def test_predict_from_factors_uses_value_direction_not_confidence_alone():
+    bullish = SimpleNamespace(id="b1", category="sentiment", value="bullish", confidence=0.9)
+    bearish = SimpleNamespace(id="b2", category="sentiment", value="bearish", confidence=0.9)
 
-    session = FakeSession([
-        FakeResult(items=[]),                       # FactorWeight
-        FakeResult(items=[market_a, market_b]),     # Markets
-        FakeResult(items=[]),                       # global factors
-        # market_a: recent prediction exists
-        FakeResult(scalar_value=1),                 # dedupe count for mkt-a
-        # market_b: no recent prediction
-        FakeResult(scalar_value=0),                 # dedupe count for mkt-b
-        FakeResult(items=[]),                       # market_b factors
-    ])
-    mock_session_local.return_value = session
+    bull_signal = _predict_from_factors(
+        factors=[bullish],
+        market_yes_price=0.5,
+        weights={"sentiment": 1.0},
+    )
+    bear_signal = _predict_from_factors(
+        factors=[bearish],
+        market_yes_price=0.5,
+        weights={"sentiment": 1.0},
+    )
 
-    await generate_all_predictions()
-
-    assert session.committed
-    assert len(session.added) == 1, f"Expected 1 prediction (mkt-b only), got {len(session.added)}"
+    assert bull_signal["predicted_outcome"] == "YES"
+    assert bear_signal["predicted_outcome"] == "NO"
 
 
-def test_generate_is_callable():
-    assert callable(generate_all_predictions)
+def test_predict_from_factors_normalizes_categories_to_lowercase():
+    factors = [
+        SimpleNamespace(id="f1", category="Social media", value="bullish", confidence=0.8),
+        SimpleNamespace(id="f2", category="social media", value="bearish", confidence=0.8),
+    ]
+    signal = _predict_from_factors(
+        factors=factors,
+        market_yes_price=0.5,
+        weights={"social media": 1.0},
+    )
+    assert signal["factor_categories"] == ["social media"]

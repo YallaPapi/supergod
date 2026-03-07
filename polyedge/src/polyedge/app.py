@@ -945,35 +945,63 @@ async def human_dashboard():
                     ],
                 }
 
-            if open_count == 0 and closed_count == 0:
+            # All-inclusive counts (including crypto up/down)
+            # Trade-level counts (each strategy's bet counts separately)
+            all_closed = (await session.execute(
+                select(func.count(PaperTrade.id))
+                .where(PaperTrade.resolved == True, PaperTrade.entry_price > 0.02)  # noqa: E712
+            )).scalar() or 0
+            all_open = (await session.execute(
+                select(func.count(PaperTrade.id))
+                .where(PaperTrade.resolved == False, PaperTrade.entry_price > 0.02)  # noqa: E712
+            )).scalar() or 0
+            all_wins = (await session.execute(
+                select(func.count(PaperTrade.id))
+                .where(PaperTrade.resolved == True, PaperTrade.entry_price > 0.02, PaperTrade.won == True)  # noqa: E712
+            )).scalar() or 0
+            all_pnl = (await session.execute(
+                select(func.sum(PaperTrade.pnl))
+                .where(PaperTrade.resolved == True, PaperTrade.entry_price > 0.02)  # noqa: E712
+            )).scalar() or 0.0
+            all_wr = round(all_wins / all_closed * 100, 1) if all_closed else None
+            # Unique market counts (so we don't triple-count when multiple strategies bet same market)
+            unique_markets_open = (await session.execute(
+                select(func.count(func.distinct(PaperTrade.market_id)))
+                .where(PaperTrade.resolved == False, PaperTrade.entry_price > 0.02)  # noqa: E712
+            )).scalar() or 0
+            unique_markets_closed = (await session.execute(
+                select(func.count(func.distinct(PaperTrade.market_id)))
+                .where(PaperTrade.resolved == True, PaperTrade.entry_price > 0.02)  # noqa: E712
+            )).scalar() or 0
+
+            if all_open == 0 and all_closed == 0:
                 pt_status = "not_started"
                 pt_explanation = (
                     "No paper trades have been placed yet. "
                     "The paper trading scheduler needs to be running on the compute server."
                 )
-            elif open_count > 0 and closed_count == 0:
+            elif all_open > 0 and all_closed == 0:
                 pt_status = "active_no_results"
                 pt_explanation = (
-                    f"{open_count:,} paper trades are open but none have resolved yet. "
-                    "Trades resolve when markets settle on Polymarket."
+                    f"{unique_markets_open:,} markets with open trades, waiting to resolve."
                 )
             else:
-                pt_status = "active"
                 pt_explanation = (
-                    f"{open_count:,} open, {closed_count} closed. "
-                    f"Win rate: {pt_win_rate}%. Total PnL: ${total_pnl:.2f}."
+                    f"{unique_markets_open:,} markets open, {unique_markets_closed:,} resolved. "
+                    f"PnL: ${float(all_pnl):.2f} across {all_closed:,} trades."
                 )
+                pt_status = "active"
 
-            # Recent closed trades for the ledger (exclude junk)
+            # Recent closed trades for the ledger (all trades, entry > $0.02)
             recent_trades_rows = (await session.execute(
-                select(PaperTrade, Market.question)
+                select(PaperTrade, Market.question, Market.market_category)
                 .join(Market, Market.id == PaperTrade.market_id)
-                .where(*resolved_real_preds)
+                .where(PaperTrade.resolved == True, PaperTrade.entry_price > 0.02)  # noqa: E712
                 .order_by(desc(PaperTrade.resolved_at))
                 .limit(200)
             )).all()
             recent_trades = []
-            for trade, question in recent_trades_rows:
+            for trade, question, market_cat in recent_trades_rows:
                 recent_trades.append({
                     "question": (question or "?")[:80],
                     "side": trade.side,
@@ -982,6 +1010,7 @@ async def human_dashboard():
                     "pnl": round(float(trade.pnl or 0), 4),
                     "resolved_at": _iso_utc(trade.resolved_at),
                     "source": trade.trade_source or "ngram",
+                    "category": market_cat or "other",
                 })
 
             # Open trades — with rule explanation, filter junk, dedup by market
@@ -1255,19 +1284,19 @@ async def human_dashboard():
                 "generated_at": _iso_utc(now),
                 "action": action,
                 "hit_rate": {
-                    "primary_pct": pt_hit,
+                    "primary_pct": all_wr,
                     "primary_label": "Paper Trade Results",
                     "rules_high_confidence": rule_count_high,
                     "rules_medium_confidence": rule_count_mid,
                     "opportunities_now": len(opportunities),
-                    "paper_trade_pct": pt_hit,
-                    "paper_trade_scored": pt_scored,
-                    "paper_trade_correct": pt_correct,
+                    "paper_trade_pct": all_wr,
+                    "paper_trade_scored": all_closed,
+                    "paper_trade_correct": all_wins,
                     "explanation": (
-                        f"Paper trade results: {pt_hit}% win rate ({pt_correct} wins out of {pt_scored} trades). "
-                        if pt_scored > 0 and pt_hit is not None else
-                        f"{open_count:,} paper trades open, waiting for markets to resolve. "
-                        if open_count > 0 else
+                        f"Paper trade results: {all_wr}% win rate ({all_wins} wins out of {all_closed} trades). "
+                        if all_closed > 0 and all_wr is not None else
+                        f"{all_open:,} paper trades open, waiting for markets to resolve. "
+                        if all_open > 0 else
                         "Paper trader hasn't started yet. "
                     ) + (
                         f"Each trade is backed by a rule proven on 500+ resolved markets."
@@ -1280,10 +1309,12 @@ async def human_dashboard():
                     "status": pt_status,
                     "explanation": pt_explanation,
                     "last_scored_at": last_scored_at,
-                    "open_count": open_count,
-                    "closed_count": closed_count,
-                    "total_pnl": round(float(total_pnl), 2),
-                    "win_rate_pct": pt_win_rate,
+                    "open_count": all_open,
+                    "closed_count": all_closed,
+                    "total_pnl": round(float(all_pnl), 2),
+                    "win_rate_pct": all_wr,
+                    "unique_markets_open": unique_markets_open,
+                    "unique_markets_closed": unique_markets_closed,
                     "open_trades": open_trades_list,
                     "total_unique_open": total_unique_open,
                     "recent_closed": recent_trades,

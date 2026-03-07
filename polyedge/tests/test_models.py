@@ -1,6 +1,6 @@
 from polyedge.models import (
     Market, Factor, Prediction, FactorWeight, PriceSnapshot, Base,
-    DailyFeature, MarketPriceHistory, TradingRule, PaperTrade, NgramStat,
+    DailyFeature, MarketPriceHistory, TradingRule, PaperTrade, NgramStat, ServiceHeartbeat,
 )
 
 
@@ -16,6 +16,7 @@ def test_market_defaults():
     assert table.c.yes_price.default.arg == 0.5
     assert table.c.active.default.arg is True
     assert table.c.resolved.default.arg is False
+    assert table.c.resolution_source.default.arg == ""
 
 
 def test_factor_allows_null_market():
@@ -32,6 +33,7 @@ def test_v3_models_importable():
     assert TradingRule is not None
     assert PaperTrade is not None
     assert NgramStat is not None
+    assert ServiceHeartbeat is not None
 
 
 def test_v3_tablenames():
@@ -40,6 +42,7 @@ def test_v3_tablenames():
     assert TradingRule.__tablename__ == "trading_rules"
     assert PaperTrade.__tablename__ == "paper_trades"
     assert NgramStat.__tablename__ == "ngram_stats"
+    assert ServiceHeartbeat.__tablename__ == "service_heartbeats"
 
 
 def test_daily_feature_unique_index():

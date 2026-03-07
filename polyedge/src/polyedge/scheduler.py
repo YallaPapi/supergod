@@ -349,14 +349,21 @@ async def run_correlation_refresh():
 async def run_llm_paper_trading():
     """Open paper trades based on LLM predictions (Grok/Perplexity factors).
 
-    Reads existing predictions from the predictions table and trades when
-    the LLM's confidence disagrees with the market price by >= 10%.
-    Only targets markets ending within 48 hours for capital efficiency.
+    Reads existing predictions from the predictions table. The confidence
+    values are NOT probabilities — they are conviction scores (typically
+    0.01-0.50) from rule agreement. We use confidence as a conviction
+    filter and entry price as a risk filter, not confidence-minus-price.
+
+    Criteria to trade:
+    - Confidence >= 0.15 (top ~25% of predictions, system has conviction)
+    - Entry price <= 0.50 (favorable risk/reward — win big, lose small)
+    - Market ends within 48h
     """
     from polyedge.models import Market, Prediction, PaperTrade
     from sqlalchemy import select, func
 
-    MIN_EDGE = 0.10
+    MIN_CONFIDENCE = 0.15  # conviction threshold (top ~25% of predictions)
+    MAX_ENTRY_PRICE = 0.50  # risk/reward filter (win >= loss)
     now = _utcnow_naive()
     max_end = now + timedelta(hours=48)
 
@@ -404,6 +411,10 @@ async def run_llm_paper_trading():
             if side not in ("YES", "NO"):
                 continue
 
+            # Skip low-conviction predictions
+            if pred.confidence < MIN_CONFIDENCE:
+                continue
+
             yes_price = float(market.yes_price or 0.5)
             no_price = float(market.no_price) if market.no_price is not None else max(0.001, 1.0 - yes_price)
 
@@ -411,16 +422,19 @@ async def run_llm_paper_trading():
             if yes_price <= 0.02 or yes_price >= 0.98:
                 continue
 
-            # Calculate edge: LLM confidence vs market price
             if side == "YES":
                 entry = yes_price
-                edge = pred.confidence - yes_price
             else:
                 entry = no_price
-                edge = pred.confidence - no_price
 
-            if edge < MIN_EDGE:
+            # Only trade when entry price gives favorable risk/reward
+            if entry > MAX_ENTRY_PRICE:
                 continue
+
+            # Edge = potential win (1 - entry) vs potential loss (entry)
+            # At entry 0.30: win $0.70, lose $0.30 — great risk/reward
+            # At entry 0.50: win $0.50, lose $0.50 — breakeven risk/reward
+            edge = 1.0 - entry - entry  # net edge = win - loss = (1-entry) - entry
 
             trade_key = (market.id, side)
             if trade_key in existing:
@@ -431,7 +445,7 @@ async def run_llm_paper_trading():
                 rule_id=None,
                 side=side,
                 entry_price=entry,
-                edge=edge,
+                edge=pred.confidence,  # store conviction as edge for tracking
                 bet_size=1.0,
                 trade_source="llm",
                 resolved=False,
@@ -457,7 +471,6 @@ async def run_combined_paper_trading():
     from sqlalchemy import select, func
 
     MIN_NGRAM_EDGE = 0.05
-    MIN_LLM_EDGE = 0.10
     now = _utcnow_naive()
     max_end = now + timedelta(hours=48)
 
@@ -560,7 +573,7 @@ async def run_combined_paper_trading():
             if not ngram_signals:
                 continue
 
-            # Check LLM prediction
+            # Check LLM prediction (confidence is conviction, not probability)
             pred = preds_by_market.get(market.id)
             if pred is None:
                 continue
@@ -568,9 +581,7 @@ async def run_combined_paper_trading():
             llm_side = (pred.predicted_outcome or "").upper()
             if llm_side not in ("YES", "NO"):
                 continue
-            llm_entry = yes_price if llm_side == "YES" else no_price
-            llm_edge = pred.confidence - llm_entry
-            if llm_edge < MIN_LLM_EDGE:
+            if pred.confidence < 0.15:
                 continue
 
             # Check agreement
@@ -578,7 +589,7 @@ async def run_combined_paper_trading():
                 continue
 
             ngram_sig = ngram_signals[llm_side]
-            combined_edge = min(ngram_sig["edge"], llm_edge)
+            combined_edge = ngram_sig["edge"]  # use ngram edge (LLM confidence is conviction, not edge)
 
             trade_key = (market.id, llm_side)
             if trade_key in existing:

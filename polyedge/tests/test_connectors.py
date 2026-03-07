@@ -40,10 +40,12 @@ class FakeKeyConnector(BaseConnector):
 
 @pytest.fixture(autouse=True)
 def _clear_registry():
-    """Clear the global registry before and after each test."""
+    """Isolate registry for each test, then restore original state."""
+    saved = list(registry._CONNECTORS)
     registry._CONNECTORS.clear()
     yield
     registry._CONNECTORS.clear()
+    registry._CONNECTORS.extend(saved)
 
 
 # --------------- Tests ---------------
