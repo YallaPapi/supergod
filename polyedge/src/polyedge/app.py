@@ -981,6 +981,7 @@ async def human_dashboard():
                     "won": trade.won,
                     "pnl": round(float(trade.pnl or 0), 4),
                     "resolved_at": _iso_utc(trade.resolved_at),
+                    "source": trade.trade_source or "ngram",
                 })
 
             # Open trades — with rule explanation, filter junk, dedup by market
@@ -1113,6 +1114,32 @@ async def human_dashboard():
             combined_pnl = float(total_pnl) + float(crypto_pnl)
             combined_wr = round(combined_wins / combined_closed * 100, 1) if combined_closed else None
             combined_open = open_count + crypto_open
+
+            # --- TRADE SOURCE BREAKDOWN (ngram vs llm vs combined) ---
+            source_stats = {}
+            for src in ("ngram", "llm", "combined"):
+                src_closed = (await session.execute(
+                    select(func.count(PaperTrade.id))
+                    .where(PaperTrade.resolved == True, PaperTrade.trade_source == src)  # noqa: E712
+                )).scalar() or 0
+                src_wins = (await session.execute(
+                    select(func.count(PaperTrade.id))
+                    .where(PaperTrade.resolved == True, PaperTrade.trade_source == src, PaperTrade.won == True)  # noqa: E712
+                )).scalar() or 0
+                src_pnl = (await session.execute(
+                    select(func.sum(PaperTrade.pnl))
+                    .where(PaperTrade.resolved == True, PaperTrade.trade_source == src)  # noqa: E712
+                )).scalar() or 0.0
+                src_open = (await session.execute(
+                    select(func.count(PaperTrade.id))
+                    .where(PaperTrade.resolved == False, PaperTrade.trade_source == src)  # noqa: E712
+                )).scalar() or 0
+                src_wr = round(src_wins / src_closed * 100, 1) if src_closed else None
+                source_stats[src] = {
+                    "open": src_open, "closed": src_closed,
+                    "wins": src_wins, "win_rate_pct": src_wr,
+                    "pnl": round(float(src_pnl), 2),
+                }
 
             # --- DATA FRESHNESS ---
             latest_factor_at = (await session.execute(
@@ -1289,6 +1316,11 @@ async def human_dashboard():
                             "win_rate_pct": combined_wr,
                             "pnl": round(combined_pnl, 2),
                         },
+                    },
+                    "by_source": {
+                        "ngram": {**source_stats["ngram"], "label": "Ngram Rules"},
+                        "llm": {**source_stats["llm"], "label": "LLM Predictions"},
+                        "combined": {**source_stats["combined"], "label": "Ngram + LLM"},
                     },
                 },
                 "data_freshness": {

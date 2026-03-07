@@ -176,14 +176,15 @@
     <div id="resolvedTableWrap" style="overflow-x:auto; max-height: 350px; overflow-y: auto;">
       <table id="recentResolvedTable">
         <thead><tr>
-          <th style="width:40%">Market</th>
+          <th style="width:35%">Market</th>
           <th>Side</th>
           <th>Entry</th>
           <th>Result</th>
           <th>P&L</th>
+          <th>Source</th>
           <th>Resolved</th>
         </tr></thead>
-        <tbody><tr><td colspan="6" class="empty-msg">Loading...</td></tr></tbody>
+        <tbody><tr><td colspan="7" class="empty-msg">Loading...</td></tr></tbody>
       </table>
     </div>
     <div style="text-align:center;margin-top:6px;">
@@ -310,18 +311,22 @@
 
   function renderResolvedRows(rows) {
     const tbody = $('recentResolvedTable').querySelector('tbody');
+    const srcColors = {ngram:'#4a9eff', llm:'#6c5ce7', combined:'#00b894'};
     tbody.innerHTML = rows.map(t => {
       const result = t.won ? 'WON' : 'LOST';
       const resultCls = t.won ? 'win' : 'loss';
       const pnlVal = Number(t.pnl || 0);
       const pnlCls = pnlVal >= 0 ? 'win' : 'loss';
       const pnlSign = pnlVal >= 0 ? '+' : '';
+      const src = t.source || 'ngram';
+      const srcColor = srcColors[src] || '#888';
       return `<tr>
         <td>${esc(t.question)}</td>
         <td class="col-action ${t.side === 'YES' ? 'yes' : 'no'}">${esc(t.side)}</td>
         <td>$${Number(t.entry_price || 0).toFixed(2)}</td>
         <td class="col-pnl ${resultCls}">${result}</td>
         <td class="col-pnl ${pnlCls}">${pnlSign}$${Math.abs(pnlVal).toFixed(2)}</td>
+        <td><span style="font-size:0.7rem;padding:2px 6px;border-radius:4px;background:${srcColor}22;color:${srcColor};font-weight:600">${src.toUpperCase()}</span></td>
         <td style="font-size:0.78rem">${fmtDateTime(t.resolved_at)}</td>
       </tr>`;
     }).join('');
@@ -477,6 +482,30 @@
         + cohortLine(oth)
         + '</div>';
     }
+    // Show trade source experiment breakdown (ngram vs llm vs combined)
+    const bs = pt.by_source;
+    if (bs) {
+      let srcHtml = '<div style="margin-top:10px;padding:10px;background:#1a1d25;border-radius:8px;font-size:0.8rem">';
+      srcHtml += '<div style="font-weight:600;margin-bottom:6px;color:#e0e0e0">Experiment Comparison</div>';
+      srcHtml += '<table style="width:100%;border-collapse:collapse;font-size:0.78rem">';
+      srcHtml += '<thead><tr style="color:#888;text-align:left"><th></th><th>Open</th><th>Closed</th><th>Win Rate</th><th>P&L</th></tr></thead><tbody>';
+      for (const key of ['ngram', 'llm', 'combined']) {
+        const s = bs[key];
+        if (!s) continue;
+        const pnlColor = (s.pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)';
+        const pnlSign = (s.pnl || 0) >= 0 ? '+' : '';
+        const wrText = s.win_rate_pct != null ? s.win_rate_pct + '%' : '-';
+        srcHtml += `<tr>
+          <td style="font-weight:600;padding:3px 6px">${esc(s.label)}</td>
+          <td style="padding:3px 6px">${s.open || 0}</td>
+          <td style="padding:3px 6px">${s.closed || 0}</td>
+          <td style="padding:3px 6px">${wrText}</td>
+          <td style="padding:3px 6px;color:${pnlColor}">${pnlSign}$${Number(s.pnl || 0).toFixed(2)}</td>
+        </tr>`;
+      }
+      srcHtml += '</tbody></table></div>';
+      $('paperDetail').innerHTML += srcHtml;
+    }
 
     // --- OPPORTUNITIES TABLE ---
     const opps = d.opportunities || [];
@@ -507,7 +536,7 @@
     const resolvedCountEl = $('resolvedCount');
     const showMoreBtn = $('resolvedShowMore');
     if (closed.length === 0) {
-      resolvedTbody.innerHTML = '<tr><td colspan="6" class="empty-msg">No trades have resolved yet.</td></tr>';
+      resolvedTbody.innerHTML = '<tr><td colspan="7" class="empty-msg">No trades have resolved yet.</td></tr>';
       resolvedCountEl.textContent = '';
       showMoreBtn.style.display = 'none';
     } else {
