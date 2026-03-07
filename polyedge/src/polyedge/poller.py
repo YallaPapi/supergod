@@ -37,11 +37,14 @@ def parse_market(raw: dict) -> dict:
         elif no_price >= 0.99:
             resolution = "NO"
             resolution_source = "polymarket_api"
+    from polyedge.analysis.market_classifier import classify_market
+    question = raw.get("question", "")
     return {
         "id": raw["id"],
-        "question": raw.get("question", ""),
+        "question": question,
         "slug": raw.get("slug", ""),
         "category": raw.get("category", ""),
+        "market_category": classify_market(question),
         "description": raw.get("description", ""),
         "end_date": end_date,
         "yes_price": yes_price,

@@ -4,7 +4,7 @@ import json
 import logging
 import os
 import socket
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from polyedge.db import SessionLocal
 from polyedge.db import settings as db_settings
@@ -183,16 +183,26 @@ async def run_paper_trading():
             })
         log.info("Loaded %d ngram rules for paper trading", len(parsed_rules))
 
-        # Load ALL active markets
+        # Load active markets ending within 48 hours (capital efficiency)
+        now = _utcnow_naive()
+        max_end = now + timedelta(hours=48)
         markets = (await session.execute(
-            select(Market).where(Market.active == True)  # noqa: E712
+            select(Market).where(
+                Market.active == True,  # noqa: E712
+                Market.end_date.is_not(None),
+                Market.end_date > now,
+                Market.end_date <= max_end,
+            )
         )).scalars().all()
-        log.info("Scanning %d active markets for tiered edge thresholds", len(markets))
+        log.info("Scanning %d active markets ending within 48h", len(markets))
 
-        # Pre-load existing open trades — one trade per market+side
+        # Pre-load existing open ngram trades — one trade per market+side+source
         open_pt_rows = (await session.execute(
             select(PaperTrade.market_id, PaperTrade.side)
-            .where(PaperTrade.resolved == False)  # noqa: E712
+            .where(
+                PaperTrade.resolved == False,  # noqa: E712
+                PaperTrade.trade_source == "ngram",
+            )
         )).all()
         existing_trades: set[tuple[str, str]] = {(r[0], r[1]) for r in open_pt_rows}
 
@@ -200,7 +210,6 @@ async def run_paper_trading():
         skipped_noise = 0
         skipped_expired = 0
         batch_pending = 0
-        now = _utcnow_naive()
         for i, market in enumerate(markets):
             q_lower = (market.question or "").lower()
 
@@ -337,6 +346,263 @@ async def run_correlation_refresh():
         log.error("Correlation refresh failed: %s", e, exc_info=True)
 
 
+async def run_llm_paper_trading():
+    """Open paper trades based on LLM predictions (Grok/Perplexity factors).
+
+    Reads existing predictions from the predictions table and trades when
+    the LLM's confidence disagrees with the market price by >= 10%.
+    Only targets markets ending within 48 hours for capital efficiency.
+    """
+    from polyedge.models import Market, Prediction, PaperTrade
+    from sqlalchemy import select, func
+
+    MIN_EDGE = 0.10
+    now = _utcnow_naive()
+    max_end = now + timedelta(hours=48)
+
+    async with SessionLocal() as session:
+        # Get the most recent prediction per market (subquery)
+        latest_pred = (
+            select(
+                Prediction.market_id,
+                func.max(Prediction.id).label("latest_id"),
+            )
+            .group_by(Prediction.market_id)
+            .subquery()
+        )
+
+        # Join to get full prediction rows for markets ending within 48h
+        pred_rows = (await session.execute(
+            select(Prediction, Market)
+            .join(latest_pred, Prediction.id == latest_pred.c.latest_id)
+            .join(Market, Market.id == Prediction.market_id)
+            .where(
+                Market.active == True,  # noqa: E712
+                Market.end_date.is_not(None),
+                Market.end_date > now,
+                Market.end_date <= max_end,
+            )
+        )).all()
+
+        if not pred_rows:
+            log.info("LLM paper trading: 0 predictions for 48h markets")
+            return
+
+        # Pre-load existing open LLM trades
+        open_pt_rows = (await session.execute(
+            select(PaperTrade.market_id, PaperTrade.side)
+            .where(
+                PaperTrade.resolved == False,  # noqa: E712
+                PaperTrade.trade_source == "llm",
+            )
+        )).all()
+        existing: set[tuple[str, str]] = {(r[0], r[1]) for r in open_pt_rows}
+
+        trades_opened = 0
+        for pred, market in pred_rows:
+            side = (pred.predicted_outcome or "").upper()
+            if side not in ("YES", "NO"):
+                continue
+
+            yes_price = float(market.yes_price or 0.5)
+            no_price = float(market.no_price) if market.no_price is not None else max(0.001, 1.0 - yes_price)
+
+            # Skip dead markets
+            if yes_price <= 0.02 or yes_price >= 0.98:
+                continue
+
+            # Calculate edge: LLM confidence vs market price
+            if side == "YES":
+                entry = yes_price
+                edge = pred.confidence - yes_price
+            else:
+                entry = no_price
+                edge = pred.confidence - no_price
+
+            if edge < MIN_EDGE:
+                continue
+
+            trade_key = (market.id, side)
+            if trade_key in existing:
+                continue
+
+            trade = PaperTrade(
+                market_id=market.id,
+                rule_id=None,
+                side=side,
+                entry_price=entry,
+                edge=edge,
+                bet_size=1.0,
+                trade_source="llm",
+                resolved=False,
+            )
+            session.add(trade)
+            existing.add(trade_key)
+            trades_opened += 1
+
+        await session.commit()
+
+    log.info("LLM paper trading: %d new trades from %d predictions", trades_opened, len(pred_rows))
+
+
+async def run_combined_paper_trading():
+    """Open paper trades only when BOTH ngram rules AND LLM predictions agree.
+
+    Checks markets ending within 48h. For each market, looks for:
+    1. A matching ngram rule with edge >= 5%
+    2. An LLM prediction with edge >= 10%
+    If both exist and predict the SAME side, opens a combined trade.
+    """
+    from polyedge.models import Market, TradingRule, Prediction, PaperTrade
+    from sqlalchemy import select, func
+
+    MIN_NGRAM_EDGE = 0.05
+    MIN_LLM_EDGE = 0.10
+    now = _utcnow_naive()
+    max_end = now + timedelta(hours=48)
+
+    async with SessionLocal() as session:
+        # Load ngram rules
+        rules = (await session.execute(
+            select(TradingRule).where(
+                TradingRule.active == True,  # noqa: E712
+                TradingRule.win_rate >= 0.60,
+                TradingRule.sample_size >= 500,
+                TradingRule.rule_type == "ngram",
+                TradingRule.tier.in_([1, 2]),
+            )
+        )).scalars().all()
+
+        if not rules:
+            log.info("Combined paper trading: no qualified ngram rules")
+            return
+
+        parsed_rules: list[dict] = []
+        for r in rules:
+            try:
+                cond = json.loads(r.conditions_json) if isinstance(r.conditions_json, str) else (r.conditions_json or {})
+            except (json.JSONDecodeError, TypeError):
+                continue
+            phrase = str(cond.get("ngram", "")).strip().lower()
+            if not phrase:
+                continue
+            parsed_rules.append({
+                "id": r.id, "phrase": phrase, "side": r.predicted_side,
+                "win_rate": r.win_rate, "breakeven": r.breakeven_price or r.win_rate,
+            })
+
+        # Load markets ending within 48h
+        markets = (await session.execute(
+            select(Market).where(
+                Market.active == True,  # noqa: E712
+                Market.end_date.is_not(None),
+                Market.end_date > now,
+                Market.end_date <= max_end,
+            )
+        )).scalars().all()
+
+        if not markets:
+            log.info("Combined paper trading: no markets ending within 48h")
+            return
+
+        # Load latest predictions keyed by market_id
+        market_ids = [m.id for m in markets]
+        latest_pred = (
+            select(
+                Prediction.market_id,
+                func.max(Prediction.id).label("latest_id"),
+            )
+            .where(Prediction.market_id.in_(market_ids))
+            .group_by(Prediction.market_id)
+            .subquery()
+        )
+        pred_rows = (await session.execute(
+            select(Prediction)
+            .join(latest_pred, Prediction.id == latest_pred.c.latest_id)
+        )).scalars().all()
+        preds_by_market: dict[str, Prediction] = {p.market_id: p for p in pred_rows}
+
+        # Pre-load existing open combined trades
+        open_pt_rows = (await session.execute(
+            select(PaperTrade.market_id, PaperTrade.side)
+            .where(
+                PaperTrade.resolved == False,  # noqa: E712
+                PaperTrade.trade_source == "combined",
+            )
+        )).all()
+        existing: set[tuple[str, str]] = {(r[0], r[1]) for r in open_pt_rows}
+
+        trades_opened = 0
+        for market in markets:
+            q_lower = (market.question or "").lower()
+            if "up or down" in q_lower:
+                continue
+
+            yes_price = float(market.yes_price or 0.5)
+            no_price = float(market.no_price) if market.no_price is not None else max(0.001, 1.0 - yes_price)
+            if yes_price <= 0.02 or yes_price >= 0.98:
+                continue
+
+            # Find best ngram signal per side
+            ngram_signals: dict[str, dict] = {}
+            for rule in parsed_rules:
+                if rule["phrase"] not in q_lower:
+                    continue
+                side = rule["side"]
+                entry = yes_price if side == "YES" else no_price
+                edge = rule["breakeven"] - entry
+                if edge < MIN_NGRAM_EDGE:
+                    continue
+                existing_sig = ngram_signals.get(side)
+                if existing_sig is None or edge > existing_sig["edge"]:
+                    ngram_signals[side] = {"rule_id": rule["id"], "side": side, "entry": entry, "edge": edge}
+
+            if not ngram_signals:
+                continue
+
+            # Check LLM prediction
+            pred = preds_by_market.get(market.id)
+            if pred is None:
+                continue
+
+            llm_side = (pred.predicted_outcome or "").upper()
+            if llm_side not in ("YES", "NO"):
+                continue
+            llm_entry = yes_price if llm_side == "YES" else no_price
+            llm_edge = pred.confidence - llm_entry
+            if llm_edge < MIN_LLM_EDGE:
+                continue
+
+            # Check agreement
+            if llm_side not in ngram_signals:
+                continue
+
+            ngram_sig = ngram_signals[llm_side]
+            combined_edge = min(ngram_sig["edge"], llm_edge)
+
+            trade_key = (market.id, llm_side)
+            if trade_key in existing:
+                continue
+
+            trade = PaperTrade(
+                market_id=market.id,
+                rule_id=ngram_sig["rule_id"],
+                side=llm_side,
+                entry_price=ngram_sig["entry"],
+                edge=combined_edge,
+                bet_size=1.0,
+                trade_source="combined",
+                resolved=False,
+            )
+            session.add(trade)
+            existing.add(trade_key)
+            trades_opened += 1
+
+        await session.commit()
+
+    log.info("Combined paper trading: %d new trades", trades_opened)
+
+
 async def check_resolutions():
     """Fast-path: only fetch markets we have open trades on that should have resolved.
 
@@ -438,8 +704,14 @@ async def run_forever():
         # Feature collection (every 6 hours)
         loop(collect_daily_features, 21600, "feature_collection"),
 
-        # Paper trading: predict + open trades (every 5 min)
+        # Paper trading: ngram rules (every 5 min, 48h horizon)
         loop(run_paper_trading, 300, "paper_trading"),
+
+        # Paper trading: LLM predictions (every 5 min, 48h horizon)
+        loop(run_llm_paper_trading, 300, "llm_paper_trading"),
+
+        # Paper trading: combined ngram+LLM (every 5 min, 48h horizon)
+        loop(run_combined_paper_trading, 300, "combined_paper_trading"),
 
         # Score paper trades (every 5 min)
         loop(score_paper_trades, 300, "score_paper_trades"),
