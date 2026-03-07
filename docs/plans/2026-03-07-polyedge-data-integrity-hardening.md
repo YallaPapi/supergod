@@ -147,3 +147,54 @@ Implement and verify structural fixes for dashboard accuracy and trading-data in
 - Existing historical data still reflects prior behavior; new logic applies going forward.
 - If compute scheduler runs on separate host, copy the same `scheduler.py`/`scorer.py` there to align runtime behavior.
 - Consider adding dedicated DB migration tracking table if not already present.
+
+## Compute Host Rollout (Windows 256GB) - 2026-03-07
+
+### Target
+- Host: `88.99.142.89` (`WIN-OVKDV67ULMM`)
+- Runtime path: `C:\polyedge\polyedge`
+- Scheduler task: `PolyEdgeScheduler` (`C:\polyedge\polyedge\run_scheduler.cmd`)
+
+### Files synchronized to compute host
+- `polyedge/src/polyedge/scheduler.py`
+- `polyedge/src/polyedge/query_filters.py`
+- `polyedge/src/polyedge/analysis/scorer.py`
+- `polyedge/src/polyedge/db.py`
+
+### Deployment integrity evidence (hash match)
+- `scheduler.py` SHA256:
+  - local: `A2621250466572BBAC81066E616C17281AB22F99A410EB86A537A811B5AA90D2`
+  - remote: `a2621250466572bbac81066e616c17281ab22f99a410eb86a537a811b5aa90d2`
+- `query_filters.py` SHA256:
+  - local: `FFFC945C67E935FA331883746E46621706723A77D80019DE02290A15076957F1`
+  - remote: `fffc945c67e935fa331883746e46621706723a77d80019de02290a15076957f1`
+- `analysis/scorer.py` SHA256:
+  - local: `1E6B605F6C4638CAA3076317FB4EC86FA49FACCE2C10183ED46895419113CAA7`
+  - remote: `1e6b605f6c4638caa3076317fb4ec86fa49facce2c10183ed46895419113caa7`
+- `db.py` SHA256:
+  - local: `F555FD3A462EA262C34C73823F9D4BA20243624E6A76D6DBC357FA542B0294ED`
+  - remote: `f555fd3a462ea262c34c73823f9d4ba20243624e6a76d6dbc357fa542b0294ed`
+
+### Runtime config update
+- Added env key on compute host:
+  - `POLYEDGE_PREDICTION_RESOLUTION_SOURCES=polymarket_api`
+- Reason:
+  - Required by `polyedge/src/polyedge/db.py:10` and consumed by scorer parsing logic in `polyedge/src/polyedge/analysis/scorer.py:52-62`.
+
+### Restart + live-runtime evidence
+- Restarted with:
+  - `C:\polyedge\polyedge\tmp_windows_restart_scheduler.ps1`
+- Task state after restart:
+  - `PolyEdgeScheduler` state: `Running`
+- Process evidence:
+  - `tasklist | findstr /I polyedge.exe` shows active `polyedge.exe`
+- Log evidence:
+  - `C:\polyedge\logs\scheduler.log` shows fresh entries for:
+    - `polyedge.scheduler INFO: PolyEdge v3 scheduler starting`
+    - active service loops (`paper_trading`, `llm_paper_trading`, `combined_paper_trading`, `score_paper_trades`, `resolution_check`)
+  - Continued market polling requests after startup (new timestamped HTTP 200 lines).
+
+### Cross-host health evidence (API DB heartbeats)
+- Checked on `89.167.99.187`:
+  - `service_heartbeats` rows for `paper_trading`, `llm_paper_trading`, `combined_paper_trading`, `resolution_check`, `score_paper_trades` all `status=ok` with fresh timestamps.
+  - `max(updated_at)` in `service_heartbeats` is near current DB time, confirming live scheduler writes.
