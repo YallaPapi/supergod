@@ -11,7 +11,7 @@ from sqlalchemy import select, func, desc, text, case, cast, Numeric
 from polyedge.db import SessionLocal
 from polyedge.analysis.scorer import prediction_metrics_cutoff
 from polyedge.db import settings as db_settings
-from polyedge.query_filters import real_trade_predicates
+from polyedge.query_filters import noise_market_predicate, real_trade_predicates
 from polyedge.models import (
     Market, TradingRule, PaperTrade, DailyFeature,
     NgramStat, Prediction, Factor, FactorWeight, PriceSnapshot, ServiceHeartbeat,
@@ -853,8 +853,9 @@ async def human_dashboard():
 
             # --- ENDING SOONEST (markets we have trades on, resolving soon) ---
             ending_rows = (await session.execute(
-                select(PaperTrade, Market.question, Market.end_date, Market.volume)
+                select(PaperTrade, Market.question, Market.end_date, Market.volume, TradingRule)
                 .join(Market, Market.id == PaperTrade.market_id)
+                .outerjoin(TradingRule, TradingRule.id == PaperTrade.rule_id)
                 .where(*real_trade_predicates(
                     now=now, resolved=False, require_future_end=True))
                 .order_by(Market.end_date.asc())
@@ -862,11 +863,12 @@ async def human_dashboard():
             )).all()
             # Deduplicate by market_id, skip noise
             seen_ending: dict[str, dict] = {}
-            for trade, question, end_date, volume in ending_rows:
+            for trade, question, end_date, volume, rule in ending_rows:
                 mid = trade.market_id
                 q = (question or "?")
                 if mid in seen_ending or "up or down" in q.lower():
                     continue
+                reason = _rule_to_plain_english(rule) if rule else "Unknown pattern"
                 seen_ending[mid] = {
                     "question": q[:120],
                     "side": trade.side,
@@ -874,6 +876,7 @@ async def human_dashboard():
                     "edge_pct": round(float(trade.edge or 0) * 100, 1),
                     "resolves_at": _iso_utc(end_date) if end_date else "Unknown",
                     "volume": float(volume or 0),
+                    "why": reason,
                 }
             ending_soonest = list(seen_ending.values())[:20]
 
@@ -967,7 +970,7 @@ async def human_dashboard():
                 .join(Market, Market.id == PaperTrade.market_id)
                 .where(*resolved_real_preds)
                 .order_by(desc(PaperTrade.resolved_at))
-                .limit(20)
+                .limit(200)
             )).all()
             recent_trades = []
             for trade, question in recent_trades_rows:
@@ -1041,6 +1044,26 @@ async def human_dashboard():
                 )
             )).scalar() or 0
 
+            # Hourly resolution schedule — next 48 hours
+            schedule_rows = (await session.execute(
+                select(
+                    func.date_trunc('hour', Market.end_date).label('hour_bucket'),
+                    func.count(PaperTrade.id).label('trade_count'),
+                )
+                .join(Market, Market.id == PaperTrade.market_id)
+                .where(
+                    *open_real_preds,
+                    Market.end_date > now,
+                    Market.end_date < now + timedelta(hours=48),
+                )
+                .group_by('hour_bucket')
+                .order_by('hour_bucket')
+            )).all()
+            resolution_schedule = [
+                {"hour": _iso_utc(row[0]), "count": row[1]}
+                for row in schedule_rows
+            ]
+
             # Average edge
             avg_edge_raw = (await session.execute(
                 select(func.avg(PaperTrade.edge))
@@ -1048,6 +1071,48 @@ async def human_dashboard():
                 .where(*open_real_preds)
             )).scalar()
             avg_edge_pct = round(float(avg_edge_raw or 0) * 100, 1)
+
+            # --- COHORT BREAKDOWN: crypto up/down vs everything else ---
+            _crypto_pred = noise_market_predicate()  # Market.question ILIKE '%up or down%'
+            _base_resolved = [PaperTrade.entry_price > 0.02, PaperTrade.resolved == True]
+
+            def _cohort_stats(extra_pred):
+                """Return (closed, wins, pnl) coroutines for a cohort."""
+                preds = [*_base_resolved, extra_pred]
+                return preds
+
+            # Crypto cohort
+            crypto_preds = _cohort_stats(_crypto_pred)
+            crypto_closed = (await session.execute(
+                select(func.count(PaperTrade.id))
+                .join(Market, Market.id == PaperTrade.market_id)
+                .where(*crypto_preds)
+            )).scalar() or 0
+            crypto_wins = (await session.execute(
+                select(func.count(PaperTrade.id))
+                .join(Market, Market.id == PaperTrade.market_id)
+                .where(*crypto_preds, PaperTrade.won == True)
+            )).scalar() or 0
+            crypto_pnl = (await session.execute(
+                select(func.sum(PaperTrade.pnl))
+                .join(Market, Market.id == PaperTrade.market_id)
+                .where(*crypto_preds)
+            )).scalar() or 0.0
+            crypto_wr = round(crypto_wins / crypto_closed * 100, 1) if crypto_closed else None
+            crypto_open = (await session.execute(
+                select(func.count(PaperTrade.id))
+                .join(Market, Market.id == PaperTrade.market_id)
+                .where(PaperTrade.entry_price > 0.02, _crypto_pred,
+                       PaperTrade.resolved == False)
+            )).scalar() or 0
+
+            # Non-crypto cohort (already computed above as closed_count/wins/total_pnl)
+            # Combined = crypto + non-crypto
+            combined_closed = closed_count + crypto_closed
+            combined_wins = wins + crypto_wins
+            combined_pnl = float(total_pnl) + float(crypto_pnl)
+            combined_wr = round(combined_wins / combined_closed * 100, 1) if combined_closed else None
+            combined_open = open_count + crypto_open
 
             # --- DATA FRESHNESS ---
             latest_factor_at = (await session.execute(
@@ -1197,7 +1262,34 @@ async def human_dashboard():
                     "recent_closed": recent_trades,
                     "ending_today": ending_today,
                     "ending_this_week": ending_week,
+                    "resolution_schedule": resolution_schedule,
                     "avg_edge_pct": avg_edge_pct,
+                    "cohorts": {
+                        "crypto": {
+                            "label": "Crypto Up/Down",
+                            "open": crypto_open,
+                            "closed": crypto_closed,
+                            "wins": crypto_wins,
+                            "win_rate_pct": crypto_wr,
+                            "pnl": round(float(crypto_pnl), 2),
+                        },
+                        "other": {
+                            "label": "Non-Crypto Markets",
+                            "open": open_count,
+                            "closed": closed_count,
+                            "wins": wins,
+                            "win_rate_pct": pt_win_rate,
+                            "pnl": round(float(total_pnl), 2),
+                        },
+                        "combined": {
+                            "label": "All Markets",
+                            "open": combined_open,
+                            "closed": combined_closed,
+                            "wins": combined_wins,
+                            "win_rate_pct": combined_wr,
+                            "pnl": round(combined_pnl, 2),
+                        },
+                    },
                 },
                 "data_freshness": {
                     "status": freshness_status,

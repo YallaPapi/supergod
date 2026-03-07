@@ -136,6 +136,17 @@
   </div>
 </div>
 
+<!-- RESOLUTION SCHEDULE -->
+<div class="section">
+  <div class="panel">
+    <div class="panel-title">Resolution Schedule <span id="scheduleTotal" style="font-size:0.85rem;color:#999;font-weight:400"></span></div>
+    <div class="panel-explain">How many paper trades resolve each hour over the next 48h. Times shown in your local timezone.</div>
+    <div id="resolutionSchedule" style="display:flex;flex-wrap:wrap;gap:4px;margin-top:8px;">
+      <span class="empty-msg">Loading...</span>
+    </div>
+  </div>
+</div>
+
 <!-- ENDING SOONEST -->
 <div class="section">
   <div class="panel">
@@ -144,14 +155,39 @@
     <div style="overflow-x:auto; max-height: 400px; overflow-y: auto;">
       <table id="endingSoonestTable">
         <thead><tr>
-          <th style="width:40%">Market Question</th>
+          <th style="width:30%">Market Question</th>
           <th>Our Bet</th>
           <th>Entry</th>
           <th>Edge</th>
           <th>Ends</th>
+          <th style="width:30%">Why</th>
         </tr></thead>
-        <tbody><tr><td colspan="5" class="empty-msg">Loading...</td></tr></tbody>
+        <tbody><tr><td colspan="6" class="empty-msg">Loading...</td></tr></tbody>
       </table>
+    </div>
+  </div>
+</div>
+
+<!-- RECENTLY RESOLVED -->
+<div class="section">
+  <div class="panel">
+    <div class="panel-title">Recently Resolved <span id="resolvedCount" style="font-size:0.85rem;color:#999;font-weight:400"></span></div>
+    <div class="panel-explain">Trades that just settled — wins and losses as they happen.</div>
+    <div id="resolvedTableWrap" style="overflow-x:auto; max-height: 350px; overflow-y: auto;">
+      <table id="recentResolvedTable">
+        <thead><tr>
+          <th style="width:40%">Market</th>
+          <th>Side</th>
+          <th>Entry</th>
+          <th>Result</th>
+          <th>P&L</th>
+          <th>Resolved</th>
+        </tr></thead>
+        <tbody><tr><td colspan="6" class="empty-msg">Loading...</td></tr></tbody>
+      </table>
+    </div>
+    <div style="text-align:center;margin-top:6px;">
+      <button id="resolvedShowMore" onclick="toggleResolvedExpand()" style="background:#2a2d35;color:#b0b8c8;border:1px solid #3a3d45;border-radius:6px;padding:6px 18px;cursor:pointer;font-size:0.85rem;display:none;">Show More</button>
     </div>
   </div>
 </div>
@@ -249,6 +285,13 @@
     if (isNaN(d)) return null;
     return d;
   }
+  function fmtDateTime(s) {
+    const d = parseUtcDate(s);
+    if (!d) return 'Unknown';
+    try {
+      return d.toLocaleString('en-US', {month:'short', day:'numeric', hour:'numeric', minute:'2-digit', hour12:true});
+    } catch(e) { return 'Unknown'; }
+  }
   function fmtDate(s) {
     const d = parseUtcDate(s);
     if (!d) return 'TBD';
@@ -263,6 +306,40 @@
       if (diffDays <= 7) return `${diffDays}d (${dateStr})`;
       return dateStr;
     } catch(e) { return 'TBD'; }
+  }
+
+  function renderResolvedRows(rows) {
+    const tbody = $('recentResolvedTable').querySelector('tbody');
+    tbody.innerHTML = rows.map(t => {
+      const result = t.won ? 'WON' : 'LOST';
+      const resultCls = t.won ? 'win' : 'loss';
+      const pnlVal = Number(t.pnl || 0);
+      const pnlCls = pnlVal >= 0 ? 'win' : 'loss';
+      const pnlSign = pnlVal >= 0 ? '+' : '';
+      return `<tr>
+        <td>${esc(t.question)}</td>
+        <td class="col-action ${t.side === 'YES' ? 'yes' : 'no'}">${esc(t.side)}</td>
+        <td>$${Number(t.entry_price || 0).toFixed(2)}</td>
+        <td class="col-pnl ${resultCls}">${result}</td>
+        <td class="col-pnl ${pnlCls}">${pnlSign}$${Math.abs(pnlVal).toFixed(2)}</td>
+        <td style="font-size:0.78rem">${fmtDateTime(t.resolved_at)}</td>
+      </tr>`;
+    }).join('');
+  }
+  function toggleResolvedExpand() {
+    const all = window._resolvedAll || [];
+    const btn = $('resolvedShowMore');
+    const wrap = $('resolvedTableWrap');
+    window._resolvedExpanded = !window._resolvedExpanded;
+    if (window._resolvedExpanded) {
+      renderResolvedRows(all);
+      wrap.style.maxHeight = '800px';
+      btn.textContent = 'Show Less';
+    } else {
+      renderResolvedRows(all.slice(0, 20));
+      wrap.style.maxHeight = '350px';
+      btn.textContent = `Show All ${all.length}`;
+    }
   }
 
   async function fetchJSON(url) {
@@ -376,7 +453,30 @@
         + (pt.ending_this_week || 0) + ' this week. Avg edge: '
         + Number(pt.avg_edge_pct || 0).toFixed(1) + '%.';
     }
-    $('paperDetail').textContent = paperSummary;
+    $('paperDetail').innerHTML = paperSummary;
+    // Show cohort breakdown under the paper trades hero
+    const co = pt.cohorts;
+    if (co) {
+      const comb = co.combined || {};
+      const cry = co.crypto || {};
+      const oth = co.other || {};
+      // Update hero card value to show combined PnL
+      if (comb.closed > 0) {
+        ptEl.textContent = '$' + Number(comb.pnl || 0).toFixed(2);
+        ptEl.className = 'stat-big ' + (comb.pnl >= 0 ? 'positive' : 'negative');
+      }
+      function cohortLine(c) {
+        const wr = c.win_rate_pct != null ? c.win_rate_pct + '% WR' : 'no results';
+        const pnlColor = (c.pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)';
+        const pnlSign = (c.pnl || 0) >= 0 ? '+' : '';
+        return `<strong>${esc(c.label)}</strong>: ${c.open || 0} open, ${c.closed || 0} closed, ${wr}, <span style="color:${pnlColor}">${pnlSign}$${Number(c.pnl || 0).toFixed(2)}</span>`;
+      }
+      $('paperDetail').innerHTML += '<div style="margin-top:6px;font-size:0.78rem;line-height:1.7;color:var(--muted)">'
+        + cohortLine(comb) + '<br>'
+        + cohortLine(cry) + '<br>'
+        + cohortLine(oth)
+        + '</div>';
+    }
 
     // --- OPPORTUNITIES TABLE ---
     const opps = d.opportunities || [];
@@ -399,21 +499,71 @@
       }).join('');
     }
 
+    // --- RECENTLY RESOLVED TABLE ---
+    const closed = pt.recent_closed || [];
+    window._resolvedAll = closed;  // stash for expand
+    window._resolvedExpanded = false;
+    const resolvedTbody = $('recentResolvedTable').querySelector('tbody');
+    const resolvedCountEl = $('resolvedCount');
+    const showMoreBtn = $('resolvedShowMore');
+    if (closed.length === 0) {
+      resolvedTbody.innerHTML = '<tr><td colspan="6" class="empty-msg">No trades have resolved yet.</td></tr>';
+      resolvedCountEl.textContent = '';
+      showMoreBtn.style.display = 'none';
+    } else {
+      resolvedCountEl.textContent = `(${closed.length} most recent)`;
+      renderResolvedRows(closed.slice(0, 20));
+      showMoreBtn.style.display = closed.length > 20 ? '' : 'none';
+      showMoreBtn.textContent = `Show All ${closed.length}`;
+    }
+
+    // --- RESOLUTION SCHEDULE ---
+    const schedule = pt.resolution_schedule || [];
+    const schedEl = $('resolutionSchedule');
+    const schedTotal = $('scheduleTotal');
+    if (schedule.length === 0) {
+      schedEl.innerHTML = '<span class="empty-msg">No upcoming resolutions.</span>';
+      schedTotal.textContent = '';
+    } else {
+      const totalTrades = schedule.reduce((s, h) => s + h.count, 0);
+      const maxCount = Math.max(...schedule.map(h => h.count));
+      schedTotal.textContent = `(${totalTrades.toLocaleString()} trades in next 48h)`;
+      schedEl.innerHTML = schedule.map(h => {
+        const dt = parseUtcDate(h.hour);
+        if (!dt) return '';
+        const now = new Date();
+        const diffH = Math.round((dt - now) / 3600000);
+        const hourLabel = dt.toLocaleString('en-US', {hour:'numeric', minute:'2-digit', hour12:true});
+        const dayLabel = dt.toLocaleDateString('en-US', {weekday:'short'});
+        const isToday = dt.toDateString() === now.toDateString();
+        const barH = Math.max(8, Math.round((h.count / maxCount) * 60));
+        const isPast = dt < now;
+        const bgColor = isPast ? '#333' : (isToday ? '#4a9eff' : '#6c5ce7');
+        return `<div style="display:flex;flex-direction:column;align-items:center;min-width:32px;opacity:${isPast ? 0.4 : 1}" title="${h.count} trades at ${hourLabel}">
+          <span style="font-size:0.7rem;color:#ccc;margin-bottom:2px">${h.count}</span>
+          <div style="width:22px;height:${barH}px;background:${bgColor};border-radius:3px"></div>
+          <span style="font-size:0.65rem;color:#888;margin-top:2px">${hourLabel}</span>
+          ${diffH <= 0 ? '<span style="font-size:0.6rem;color:#999">now</span>' : (isToday ? '' : `<span style="font-size:0.6rem;color:#666">${dayLabel}</span>`)}
+        </div>`;
+      }).join('');
+    }
+
     // --- ENDING SOONEST TABLE ---
     const ending = d.ending_soonest || [];
     const endTbody = $('endingSoonestTable').querySelector('tbody');
     if (ending.length === 0) {
-      endTbody.innerHTML = '<tr><td colspan="5" class="empty-msg">No trades with known resolution dates yet.</td></tr>';
+      endTbody.innerHTML = '<tr><td colspan="6" class="empty-msg">No trades with known resolution dates yet.</td></tr>';
     } else {
       endTbody.innerHTML = ending.map(e => {
         const sideCls = (e.side || '').toUpperCase() === 'YES' ? 'yes' : 'no';
-        const resolves = fmtDate(e.resolves_at);
+        const resolves = fmtDateTime(e.resolves_at);
         return `<tr>
           <td>${esc(e.question)}</td>
           <td class="col-action ${sideCls}">Buy ${esc(e.side)}</td>
           <td>$${Number(e.entry_price || 0).toFixed(2)}</td>
           <td class="col-edge">${Number(e.edge_pct || 0).toFixed(1)}%</td>
           <td style="font-size:0.78rem;font-weight:600">${resolves}</td>
+          <td class="col-why" style="font-size:0.75rem">${esc(e.why || 'Unknown')}</td>
         </tr>`;
       }).join('');
     }
@@ -496,6 +646,17 @@
       }
       if (!html) {
         html = `<div class="empty-msg">${esc(pt.explanation)}</div>`;
+      } else if (pt.cohorts && pt.cohorts.combined && pt.cohorts.combined.closed > 0) {
+        const cc = pt.cohorts.combined;
+        const cry = pt.cohorts.crypto || {};
+        const oth = pt.cohorts.other || {};
+        const pnlColor = v => (v||0) >= 0 ? 'var(--green)' : 'var(--red)';
+        const pnlFmt = v => ((v||0) >= 0 ? '+' : '') + '$' + Number(v||0).toFixed(2);
+        html += `<div style="margin-top:12px;padding:10px 12px;background:var(--bg-2);border-radius:6px;font-size:0.8rem;color:var(--muted);line-height:1.8;">`;
+        html += `<div><strong style="color:var(--fg)">All Markets:</strong> ${cc.closed} trades, ${cc.win_rate_pct != null ? cc.win_rate_pct + '% WR' : '--'}, <span style="color:${pnlColor(cc.pnl)}">${pnlFmt(cc.pnl)}</span></div>`;
+        html += `<div><strong>Crypto Up/Down:</strong> ${cry.closed || 0} trades, ${cry.win_rate_pct != null ? cry.win_rate_pct + '% WR' : '--'}, <span style="color:${pnlColor(cry.pnl)}">${pnlFmt(cry.pnl)}</span></div>`;
+        html += `<div><strong>Other Markets:</strong> ${oth.closed || 0} trades, ${oth.win_rate_pct != null ? oth.win_rate_pct + '% WR' : '--'}, <span style="color:${pnlColor(oth.pnl)}">${pnlFmt(oth.pnl)}</span></div>`;
+        html += `</div>`;
       } else if (pt.closed_count > 0) {
         html += `<div style="margin-top:10px;font-size:0.8rem;color:var(--muted);">Overall: ${pt.closed_count} trades, ${pt.win_rate_pct != null ? pt.win_rate_pct + '% win rate' : 'no results'}, $${Number(pt.total_pnl || 0).toFixed(2)} PnL</div>`;
       }

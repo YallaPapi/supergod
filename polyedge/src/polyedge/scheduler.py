@@ -337,6 +337,70 @@ async def run_correlation_refresh():
         log.error("Correlation refresh failed: %s", e, exc_info=True)
 
 
+async def check_resolutions():
+    """Fast-path: only fetch markets we have open trades on that should have resolved.
+
+    Runs every 60s. Instead of polling ALL markets, fetches by ID only the ones
+    whose end_date has passed and we still have unresolved paper trades on.
+    Then immediately scores any that resolved.
+    """
+    from polyedge.models import Market, PaperTrade
+    from sqlalchemy import select
+
+    now = _utcnow_naive()
+
+    # Find markets with open paper trades whose end_date has passed
+    async with SessionLocal() as session:
+        pending_ids = (await session.execute(
+            select(Market.id)
+            .join(PaperTrade, PaperTrade.market_id == Market.id)
+            .where(
+                PaperTrade.resolved == False,  # noqa: E712
+                Market.end_date.is_not(None),
+                Market.end_date < now,
+                Market.resolution.is_(None) | (Market.resolution == ""),
+            )
+            .distinct()
+            .limit(500)
+        )).scalars().all()
+
+    if not pending_ids:
+        log.info("Resolution check: 0 markets pending")
+        return
+
+    log.info("Resolution check: fetching %d markets that should have resolved", len(pending_ids))
+
+    poller = PolymarketPoller()
+    resolved_count = 0
+    try:
+        async with SessionLocal() as session:
+            for market_id in pending_ids:
+                try:
+                    raw = await poller.fetch_market_by_id(market_id)
+                    if raw is None:
+                        continue
+                    from polyedge.poller import parse_market
+                    parsed = parse_market(raw)
+                    existing = await session.get(Market, market_id)
+                    if existing:
+                        for k, v in parsed.items():
+                            setattr(existing, k, v)
+                        existing.updated_at = now
+                        if parsed.get("resolution"):
+                            resolved_count += 1
+                except Exception:
+                    log.debug("Failed to fetch market %s", market_id, exc_info=True)
+            await session.commit()
+    finally:
+        await poller.close()
+
+    log.info("Resolution check: %d/%d markets now resolved", resolved_count, len(pending_ids))
+
+    # Immediately score the newly resolved trades
+    if resolved_count > 0:
+        await score_paper_trades()
+
+
 # ============================================================
 # MAIN SCHEDULER
 # ============================================================
@@ -379,6 +443,9 @@ async def run_forever():
 
         # Score paper trades (every 5 min)
         loop(score_paper_trades, 300, "score_paper_trades"),
+
+        # Fast resolution checker — only polls markets with open trades past end_date (every 60s)
+        loop(check_resolutions, 60, "resolution_check"),
 
         # Correlation refresh (every 24 hours)
         loop(run_correlation_refresh, 86400, "correlation_refresh"),
