@@ -8,7 +8,8 @@ PolyEdge is a **prediction market trading system** built on top of Polymarket. I
 3. Generates trading rules (keyword patterns that predict YES/NO outcomes)
 4. Runs LLM research (Grok/Perplexity) to produce market factors & predictions
 5. Paper trades using 3 parallel strategies: ngram rules, LLM predictions, combined
-6. Displays all results on a live dashboard at :8090
+6. **Planned**: Inverse strategies as control groups — for every trade, also bet the opposite side to measure if predictions have real alpha vs. market structure profits
+7. Displays all results on a live dashboard at :8090
 
 The system has been running for ~24 hours, has placed ~25,000 paper trades, and resolved ~2,000+ with ~$70 PnL.
 
@@ -111,23 +112,50 @@ The system has been running for ~24 hours, has placed ~25,000 paper trades, and 
 - API rate limiting on Polymarket Gamma API — could we get rate-limited during resolution checks?
 - Are API keys properly handled (not hardcoded in committed code)?
 
-### 8. Ideas for Improvement
-- **Backtesting**: The backtester (`backtester.py`) exists but has never been run. How should we validate rules before trading real money?
-- **Per-category rules**: Should we mine separate ngram rules per category (crypto, sports, politics, etc.) instead of global rules?
-- **LLM prediction quality**: 4M predictions but confidence values are mostly garbage (53% below 0.05). How can we improve the prediction pipeline?
-- **Capital allocation**: With $200-300 starting capital, how should we prioritize which trades to take? Currently all bets are $1. Should we size bets based on edge/confidence?
-- **Risk management**: What happens if we hit a losing streak? Should there be circuit breakers?
-- **Feature engineering**: 170 daily features from 23 sources — are we using them effectively? Or is it noise?
-- **Real-time vs batch**: The scheduler runs on fixed intervals (60s-6h). Would event-driven be better?
-- **Resolution speed**: Some Polymarket markets take days/weeks to resolve after end_date. How to handle capital tied up in unresolved markets?
+### 8. Inverse Strategy as Control Group (PLANNED — REVIEW THE DESIGN)
 
-### 9. Code Quality
+We plan to add **inverse paper trading** as a built-in control group for every strategy. For every trade our system places, we also place the opposite trade on the same market. This lets us measure whether our predictions have real alpha vs. just profiting from market structure (e.g., cheap shares being profitable regardless of direction).
+
+**How it works:**
+- For every ngram trade (e.g., BUY YES at $0.30), also place an inverse trade (BUY NO at $0.70) with `trade_source = "ngram_inverse"`
+- For every LLM trade, place `trade_source = "llm_inverse"`
+- For every combined trade, place `trade_source = "combined_inverse"`
+- Same entry price logic but flipped side
+- Dashboard shows inverse strategies alongside originals in the Strategy Comparison table
+
+**What the results tell us:**
+- If ngram PnL = +$50 and ngram_inverse PnL = -$80 → **Real edge.** Our predictions are genuinely predictive. The $130 spread is our alpha.
+- If ngram PnL = +$50 and ngram_inverse PnL = -$10 → **Weak edge.** Most of our profit comes from market structure, not prediction quality. The spread is only $60.
+- If ngram PnL = +$50 and ngram_inverse PnL = +$30 → **No edge.** Buying cheap shares is profitable regardless of direction. Our "predictions" are meaningless — we're just harvesting a market inefficiency (which is fine for making money, but means our rules aren't actually predicting outcomes).
+- If ngram PnL = -$20 and ngram_inverse PnL = +$40 → **Negative edge.** Our rules are anti-predictive. We should literally do the opposite of what they say.
+
+**Review questions:**
+- Is this the right experimental design? Are there confounding factors we're missing?
+- The inverse trade on an expensive side (e.g., NO at $0.70 when we bought YES at $0.30) has worse risk/reward by definition — win $0.30, risk $0.70. Is this a fair comparison or does the asymmetric risk/reward make the inverse always lose regardless of prediction quality?
+- Should we track inverse results per category too? (crypto inverse vs sports inverse, etc.)
+- Should the inverse entry price be the actual market price for that side, or should we match the original entry amount ($0.30 both ways)?
+- How many additional trades does this add? (Roughly 2x current volume — ~50k trades instead of ~25k)
+- Any database/performance concerns with doubling trade volume?
+
+### 9. Ideas for Improvement
+- **Backtesting**: The backtester (`backtester.py`) exists but has never been run. How should we validate rules before trading real money?
+- **Per-category rules**: Should we mine separate ngram rules per category (crypto, sports, politics, etc.) instead of global rules? We have 12 categories classified. Should rules be mined per-category, and should we backtest to see which rules work best in which categories?
+- **LLM prediction quality**: 4M predictions but confidence values are mostly garbage (53% below 0.05). How can we improve the prediction pipeline? The confidence formula (`net_weight / (total_weight + opposing_weight)`) squishes everything. Should we use a different formula? Percentile ranking? Raw factor counts?
+- **Capital allocation**: With $200-300 starting capital, how should we prioritize which trades to take? Currently all bets are $1. Should we size bets based on edge/confidence? Kelly criterion?
+- **Risk management**: What happens if we hit a losing streak? Should there be circuit breakers? Daily loss limits? Per-category limits?
+- **Feature engineering**: 170 daily features from 23 sources — are we using them effectively? Or is it noise? How to evaluate which features actually contribute to prediction quality?
+- **Real-time vs batch**: The scheduler runs on fixed intervals (60s-6h). Would event-driven be better for catching price movements?
+- **Resolution speed**: Some Polymarket markets take days/weeks to resolve after end_date. How to handle capital tied up in unresolved markets?
+- **Entry price optimization**: Currently we bet at whatever the current market price is. Should we use limit orders to get better entry prices? Should we monitor price movements and enter when price is favorable?
+- **Correlation between strategies**: If ngram and LLM both bet YES on the same market, should we count that as higher conviction? Should bet size scale with number of agreeing strategies?
+
+### 10. Code Quality
 - Are there any obvious anti-patterns, code duplication, or dead code?
 - Are the tests adequate? Run `pytest polyedge/tests/` and check coverage.
 - Is the module structure clean? Should anything be refactored?
 - Are there any circular imports or import-time side effects?
 
-### 10. Pre-Real-Money Checklist
+### 11. Pre-Real-Money Checklist
 Before deploying real money trading, what MUST be verified?
 - PnL calculation correctness (double-check the math)
 - Duplicate trade prevention (same market, same side)
