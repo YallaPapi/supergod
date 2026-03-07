@@ -1416,6 +1416,85 @@ async def paper_trading_pnl():
         }
 
 
+@app.get("/api/pnl/real-audit")
+async def paper_trading_real_audit():
+    """Audit metrics for the exact real-trade cohort shown on the dashboard."""
+    try:
+        async with SessionLocal() as session:
+            resolved_real_preds = real_trade_predicates(resolved=True)
+            totals = (
+                await session.execute(
+                    select(
+                        func.count(PaperTrade.id),
+                        func.sum(PaperTrade.entry_price),
+                        func.sum(PaperTrade.pnl),
+                    )
+                    .join(Market, Market.id == PaperTrade.market_id)
+                    .where(*resolved_real_preds)
+                )
+            ).one()
+            closed_count = int(totals[0] or 0)
+            total_entry_cost = float(totals[1] or 0.0)
+            total_pnl = float(totals[2] or 0.0)
+
+            wins = (
+                await session.execute(
+                    select(func.count(PaperTrade.id))
+                    .join(Market, Market.id == PaperTrade.market_id)
+                    .where(PaperTrade.won == True, *resolved_real_preds)  # noqa: E712
+                )
+            ).scalar() or 0
+            wins = int(wins)
+            losses = max(0, closed_count - wins)
+
+            avg_entry_price = total_entry_cost / closed_count if closed_count else 0.0
+            avg_pnl_per_trade = total_pnl / closed_count if closed_count else 0.0
+            observed_win_rate = wins / closed_count if closed_count else 0.0
+            breakeven_win_rate = avg_entry_price
+            roi_on_deployed_capital = (
+                total_pnl / total_entry_cost if total_entry_cost else 0.0
+            )
+
+            return {
+                "generated_at": _iso_utc(_utcnow_naive()),
+                "cohort": "real_trades_only",
+                "closed_count": closed_count,
+                "wins": wins,
+                "losses": losses,
+                "total_entry_cost": round(total_entry_cost, 4),
+                "total_pnl": round(total_pnl, 4),
+                "avg_entry_price": round(avg_entry_price, 6),
+                "avg_pnl_per_trade": round(avg_pnl_per_trade, 6),
+                "observed_win_rate": round(observed_win_rate, 6),
+                "breakeven_win_rate": round(breakeven_win_rate, 6),
+                "roi_on_deployed_capital": round(roi_on_deployed_capital, 6),
+                "formulas": {
+                    "pnl_if_win": "1 - entry_price",
+                    "pnl_if_loss": "-entry_price",
+                    "breakeven_win_rate": "avg_entry_price",
+                    "roi_on_deployed_capital": "total_pnl / total_entry_cost",
+                },
+            }
+    except Exception as e:
+        log.exception("paper_trading_real_audit failed")
+        return {
+            "generated_at": _iso_utc(_utcnow_naive()),
+            "cohort": "real_trades_only",
+            "closed_count": 0,
+            "wins": 0,
+            "losses": 0,
+            "total_entry_cost": 0.0,
+            "total_pnl": 0.0,
+            "avg_entry_price": 0.0,
+            "avg_pnl_per_trade": 0.0,
+            "observed_win_rate": 0.0,
+            "breakeven_win_rate": 0.0,
+            "roi_on_deployed_capital": 0.0,
+            "formulas": {},
+            "error": str(e),
+        }
+
+
 @app.get("/api/rules")
 async def list_rules(active_only: bool = True, limit: int = 100):
     """All active rules with stats."""

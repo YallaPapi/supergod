@@ -5,7 +5,14 @@ from fastapi.testclient import TestClient
 import pytest
 
 import polyedge.app as app_module
-from polyedge.app import app, _iso_utc, _prediction_edge_pct, _rule_to_plain_english, human_dashboard
+from polyedge.app import (
+    app,
+    _iso_utc,
+    _prediction_edge_pct,
+    _rule_to_plain_english,
+    human_dashboard,
+    paper_trading_real_audit,
+)
 
 
 def test_stats_endpoint_registered():
@@ -22,6 +29,10 @@ def test_dashboard_summary_endpoint():
 
 def test_pnl_endpoint():
     assert app.url_path_for("paper_trading_pnl") == "/api/pnl"
+
+
+def test_pnl_real_audit_endpoint():
+    assert app.url_path_for("paper_trading_real_audit") == "/api/pnl/real-audit"
 
 
 def test_rules_endpoint():
@@ -134,6 +145,50 @@ async def test_human_dashboard_handles_empty_opportunities_without_unbound_error
     result = await human_dashboard()
     assert "error" not in result
     assert result["generated_at"].endswith("Z")
+
+
+@pytest.mark.asyncio
+async def test_real_audit_uses_real_trade_cohort_math(monkeypatch):
+    class _Result:
+        def __init__(self, one_value=None, scalar_value=None):
+            self._one_value = one_value
+            self._scalar_value = scalar_value
+
+        def one(self):
+            return self._one_value
+
+        def scalar(self):
+            return self._scalar_value
+
+    class _Session:
+        def __init__(self):
+            self._results = [
+                _Result(one_value=(201, 93.7995, 22.2005)),  # closed_count, total_entry_cost, total_pnl
+                _Result(scalar_value=116),                   # wins
+            ]
+
+        async def execute(self, *_args, **_kwargs):
+            return self._results.pop(0)
+
+    class _SessionCtx:
+        async def __aenter__(self):
+            return _Session()
+
+        async def __aexit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(app_module, "SessionLocal", lambda: _SessionCtx())
+
+    result = await paper_trading_real_audit()
+    assert result["closed_count"] == 201
+    assert result["wins"] == 116
+    assert result["losses"] == 85
+    assert result["total_entry_cost"] == pytest.approx(93.7995, abs=1e-6)
+    assert result["total_pnl"] == pytest.approx(22.2005, abs=1e-6)
+    assert result["avg_entry_price"] == pytest.approx(93.7995 / 201, abs=1e-6)
+    assert result["observed_win_rate"] == pytest.approx(116 / 201, abs=1e-6)
+    assert result["breakeven_win_rate"] == pytest.approx(93.7995 / 201, abs=1e-6)
+    assert result["roi_on_deployed_capital"] == pytest.approx(22.2005 / 93.7995, abs=1e-6)
 
 
 class _FakeRule:
