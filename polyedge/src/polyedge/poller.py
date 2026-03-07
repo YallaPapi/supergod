@@ -108,10 +108,24 @@ class PolymarketPoller:
 
     async def poll_all(self) -> int:
         # Only poll active (non-closed) markets — ~8k instead of 326k
-        active = await self._poll_batch(closed="false")
+        active = 0
+        closed = 0
+        stale = 0
+        try:
+            active = await self._poll_batch(closed="false")
+        except Exception as exc:
+            log.warning("Active market polling failed: %r", exc, exc_info=True)
         # Also poll recently closed to catch resolutions
-        closed = await self._poll_batch(closed="true", order="updatedAt", ascending="false", max_results=500)
-        stale = await self.refresh_stale_unresolved(max_markets=200, grace_days=7)
+        try:
+            closed = await self._poll_batch(
+                closed="true", order="updatedAt", ascending="false", max_results=500
+            )
+        except Exception as exc:
+            log.warning("Closed market polling failed: %r", exc, exc_info=True)
+        try:
+            stale = await self.refresh_stale_unresolved(max_markets=200, grace_days=7)
+        except Exception as exc:
+            log.warning("Stale-market reconciliation failed: %r", exc, exc_info=True)
         total = active + closed + stale
         log.info(
             "Polled %d markets (%d active, %d recently closed, %d stale reconciled)",
@@ -160,6 +174,13 @@ class PolymarketPoller:
             reconciled = 0
             for market_id, raw in fetched.items():
                 parsed = parse_market(raw)
+                if (
+                    parsed.get("resolved") is False
+                    and parsed.get("end_date") is not None
+                    and parsed["end_date"] < cutoff
+                ):
+                    # Guard rail: stale unresolved markets should no longer be treated as active.
+                    parsed["active"] = False
                 existing = await session.get(Market, market_id)
                 if existing is None:
                     session.add(Market(**parsed))

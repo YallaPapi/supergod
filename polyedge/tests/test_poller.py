@@ -1,4 +1,9 @@
-from polyedge.poller import parse_market
+from unittest.mock import AsyncMock
+
+import httpx
+import pytest
+
+from polyedge.poller import PolymarketPoller, parse_market
 
 SAMPLE_MARKET = {
     "id": "12345",
@@ -24,6 +29,7 @@ def test_parse_market():
     assert m["no_price"] == 0.35
     assert m["active"] is True
     assert m["resolved"] is False
+    assert m["resolution_source"] == ""
 
 
 def test_parse_resolved_market():
@@ -31,6 +37,18 @@ def test_parse_resolved_market():
     m = parse_market(resolved)
     assert m["resolved"] is True
     assert m["active"] is False
+
+
+def test_parse_resolved_market_sets_authoritative_source():
+    resolved = {
+        **SAMPLE_MARKET,
+        "closed": True,
+        "active": False,
+        "outcomePrices": ["1", "0"],
+    }
+    m = parse_market(resolved)
+    assert m["resolution"] == "YES"
+    assert m["resolution_source"] == "polymarket_api"
 
 
 def test_parse_market_missing_prices():
@@ -52,3 +70,18 @@ def test_parse_market_json_string_prices():
     m = parse_market(raw)
     assert m["yes_price"] == 0.72
     assert m["no_price"] == 0.28
+
+
+@pytest.mark.asyncio
+async def test_poll_all_continues_to_stale_reconcile_on_connect_error():
+    poller = PolymarketPoller()
+    try:
+        poller._poll_batch = AsyncMock(side_effect=[httpx.ConnectError("boom"), 7])
+        poller.refresh_stale_unresolved = AsyncMock(return_value=11)
+        total = await poller.poll_all()
+    finally:
+        await poller.close()
+
+    # Should return partial progress instead of failing the whole cycle.
+    assert total == 18
+    assert poller.refresh_stale_unresolved.await_count == 1
