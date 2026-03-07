@@ -228,6 +228,16 @@ async def run_paper_trading():
         )).all()
         existing_trades: set[tuple[str, str]] = {(r[0], r[1]) for r in open_pt_rows}
 
+        # Pre-load existing open ngram_inverse trades
+        open_inv_rows = (await session.execute(
+            select(PaperTrade.market_id, PaperTrade.side)
+            .where(
+                PaperTrade.resolved == False,  # noqa: E712
+                PaperTrade.trade_source == "ngram_inverse",
+            )
+        )).all()
+        existing_inverse: set[tuple[str, str]] = {(r[0], r[1]) for r in open_inv_rows}
+
         trades_opened = 0
         skipped_noise = 0
         skipped_expired = 0
@@ -269,7 +279,7 @@ async def run_paper_trading():
                         "entry": entry, "edge": edge,
                     }
 
-            # Open one trade per side that has edge
+            # Open one trade per side that has edge, plus inverse control trade
             for match in best_by_side.values():
                 trade_key = (market.id, match["side"])
                 if trade_key in existing_trades:
@@ -288,6 +298,25 @@ async def run_paper_trading():
                 existing_trades.add(trade_key)
                 trades_opened += 1
                 batch_pending += 1
+
+                # Inverse control: bet the opposite side at actual market price
+                inv_side = "NO" if match["side"] == "YES" else "YES"
+                inv_entry = no_price if match["side"] == "YES" else yes_price
+                inv_key = (market.id, inv_side)
+                if inv_key not in existing_inverse:
+                    inv_trade = PaperTrade(
+                        market_id=market.id,
+                        rule_id=match["rule_id"],
+                        side=inv_side,
+                        entry_price=inv_entry,
+                        edge=0.0,
+                        bet_size=1.0,
+                        trade_source="ngram_inverse",
+                        resolved=False,
+                    )
+                    session.add(inv_trade)
+                    existing_inverse.add(inv_key)
+                    batch_pending += 1
 
             # Commit in batches so dashboard sees results immediately
             if batch_pending >= 100:
@@ -441,6 +470,16 @@ async def run_llm_paper_trading():
         )).all()
         existing: set[tuple[str, str]] = {(r[0], r[1]) for r in open_pt_rows}
 
+        # Pre-load existing open llm_inverse trades
+        open_inv_rows = (await session.execute(
+            select(PaperTrade.market_id, PaperTrade.side)
+            .where(
+                PaperTrade.resolved == False,  # noqa: E712
+                PaperTrade.trade_source == "llm_inverse",
+            )
+        )).all()
+        existing_inverse: set[tuple[str, str]] = {(r[0], r[1]) for r in open_inv_rows}
+
         trades_opened = 0
         for pred, market in pred_rows:
             if _is_noise_market(market):
@@ -492,6 +531,24 @@ async def run_llm_paper_trading():
             session.add(trade)
             existing.add(trade_key)
             trades_opened += 1
+
+            # Inverse control: bet the opposite side at actual market price
+            inv_side = "NO" if side == "YES" else "YES"
+            inv_entry = no_price if side == "YES" else yes_price
+            inv_key = (market.id, inv_side)
+            if inv_key not in existing_inverse:
+                inv_trade = PaperTrade(
+                    market_id=market.id,
+                    rule_id=None,
+                    side=inv_side,
+                    entry_price=inv_entry,
+                    edge=0.0,
+                    bet_size=1.0,
+                    trade_source="llm_inverse",
+                    resolved=False,
+                )
+                session.add(inv_trade)
+                existing_inverse.add(inv_key)
 
         await _safe_commit(session, loop_name="llm_paper_trading")
 
@@ -591,6 +648,16 @@ async def run_combined_paper_trading():
         )).all()
         existing: set[tuple[str, str]] = {(r[0], r[1]) for r in open_pt_rows}
 
+        # Pre-load existing open combined_inverse trades
+        open_inv_rows = (await session.execute(
+            select(PaperTrade.market_id, PaperTrade.side)
+            .where(
+                PaperTrade.resolved == False,  # noqa: E712
+                PaperTrade.trade_source == "combined_inverse",
+            )
+        )).all()
+        existing_inverse: set[tuple[str, str]] = {(r[0], r[1]) for r in open_inv_rows}
+
         trades_opened = 0
         for market in markets:
             q_lower = (market.question or "").lower()
@@ -655,6 +722,24 @@ async def run_combined_paper_trading():
             existing.add(trade_key)
             trades_opened += 1
 
+            # Inverse control: bet the opposite side at actual market price
+            inv_side = "NO" if llm_side == "YES" else "YES"
+            inv_entry = no_price if llm_side == "YES" else yes_price
+            inv_key = (market.id, inv_side)
+            if inv_key not in existing_inverse:
+                inv_trade = PaperTrade(
+                    market_id=market.id,
+                    rule_id=ngram_sig["rule_id"],
+                    side=inv_side,
+                    entry_price=inv_entry,
+                    edge=0.0,
+                    bet_size=1.0,
+                    trade_source="combined_inverse",
+                    resolved=False,
+                )
+                session.add(inv_trade)
+                existing_inverse.add(inv_key)
+
         await _safe_commit(session, loop_name="combined_paper_trading")
 
     log.info("Combined paper trading: %d new trades", trades_opened)
@@ -672,7 +757,9 @@ async def check_resolutions():
 
     now = _utcnow_naive()
 
-    # Find markets with open paper trades whose end_date has passed
+    # Find markets with open paper trades whose end_date has passed.
+    # Prioritize the most recently ended markets so today's trades get resolved first,
+    # not blocked behind months-old stuck markets.
     async with SessionLocal() as session:
         pending_ids = (await session.execute(
             select(Market.id)
@@ -684,6 +771,7 @@ async def check_resolutions():
                 Market.resolution.is_(None) | (Market.resolution == ""),
             )
             .distinct()
+            .order_by(Market.end_date.desc())
             .limit(500)
         )).scalars().all()
 
@@ -722,6 +810,27 @@ async def check_resolutions():
     # Immediately score the newly resolved trades
     if resolved_count > 0:
         await score_paper_trades()
+
+
+async def run_research_rule_bridge():
+    """Generate new rules from recent research factors."""
+    from polyedge.analysis.research_rule_bridge import generate_rules_from_research
+    stats = await generate_rules_from_research()
+    log.info("Research-to-rules bridge: %s", stats)
+
+
+async def run_backtest_refresh():
+    """Re-run full ngram backtest (weekly). Heavy computation."""
+    from polyedge.analysis.backtest_runner import backtest_ngram_rules
+    stats = await backtest_ngram_rules(batch_size=500)
+    log.info("Backtest refresh: %s", stats)
+
+
+async def run_agreement_refresh():
+    """Re-run agreement analysis (daily)."""
+    from polyedge.analysis.agreement_calculator import run_agreement_analysis
+    stats = await run_agreement_analysis()
+    log.info("Agreement refresh: %s", stats)
 
 
 # ============================================================
@@ -778,4 +887,13 @@ async def run_forever():
 
         # Correlation refresh (every 24 hours)
         loop(run_correlation_refresh, 86400, "correlation_refresh"),
+
+        # Research-to-rules bridge (every 6 hours — 21600 seconds)
+        loop(run_research_rule_bridge, 21600, "research_rule_bridge"),
+
+        # Backtest refresh (weekly — 604800 seconds)
+        loop(run_backtest_refresh, 604800, "backtest_refresh"),
+
+        # Agreement analysis (daily — 86400 seconds)
+        loop(run_agreement_refresh, 86400, "agreement_refresh"),
     )

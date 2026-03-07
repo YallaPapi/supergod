@@ -1143,7 +1143,7 @@ async def human_dashboard():
             source_stats = {}
             source_open_preds = real_trade_predicates(resolved=False)
             source_closed_preds = real_trade_predicates(resolved=True)
-            for src in ("ngram", "llm", "combined"):
+            for src in ("ngram", "llm", "combined", "ngram_inverse", "llm_inverse", "combined_inverse"):
                 src_closed = (await session.execute(
                     select(func.count(PaperTrade.id))
                     .join(Market, Market.id == PaperTrade.market_id)
@@ -1181,6 +1181,33 @@ async def human_dashboard():
                     "pnl": round(float(src_pnl), 2),
                     "unique_markets_open": src_unique_open,
                     "unique_markets_closed": src_unique_closed,
+                }
+
+            # --- PER-CATEGORY PERFORMANCE BREAKDOWN ---
+            cat_rows = (await session.execute(
+                select(
+                    func.coalesce(Market.market_category, "other").label("cat"),
+                    func.count(PaperTrade.id).label("closed"),
+                    func.sum(case((PaperTrade.won == True, 1), else_=0)).label("wins"),
+                    func.sum(PaperTrade.pnl).label("pnl"),
+                )
+                .join(Market, Market.id == PaperTrade.market_id)
+                .where(PaperTrade.resolved == True, PaperTrade.entry_price > 0.02)  # noqa: E712
+                .group_by("cat")
+                .order_by(func.sum(PaperTrade.pnl).desc())
+            )).all()
+            by_category = {}
+            for cat, closed_c, wins_c, pnl_c in cat_rows:
+                cat_str = str(cat or "other")
+                closed_i = int(closed_c or 0)
+                wins_i = int(wins_c or 0)
+                pnl_f = float(pnl_c or 0.0)
+                wr = round(wins_i / closed_i * 100, 1) if closed_i else None
+                by_category[cat_str] = {
+                    "closed": closed_i,
+                    "wins": wins_i,
+                    "win_rate_pct": wr,
+                    "pnl": round(pnl_f, 2),
                 }
 
             # --- DATA FRESHNESS ---
@@ -1370,7 +1397,11 @@ async def human_dashboard():
                         "ngram": {**source_stats["ngram"], "label": "Ngram Rules"},
                         "llm": {**source_stats["llm"], "label": "LLM Predictions"},
                         "combined": {**source_stats["combined"], "label": "Ngram + LLM"},
+                        "ngram_inverse": {**source_stats["ngram_inverse"], "label": "Ngram Inverse"},
+                        "llm_inverse": {**source_stats["llm_inverse"], "label": "LLM Inverse"},
+                        "combined_inverse": {**source_stats["combined_inverse"], "label": "Combined Inverse"},
                     },
+                    "by_category": by_category,
                 },
                 "data_freshness": {
                     "status": freshness_status,
@@ -2005,6 +2036,111 @@ async def ops_runtime_status():
             "supergod_cluster_report": cluster_report,
             "error": str(e),
         }
+
+
+@app.get("/api/backtest-summary")
+async def backtest_summary():
+    """Backtest results: top rules by PnL, inverse flip candidates, agreement tiers, category matrix."""
+    try:
+        async with SessionLocal() as session:
+            from polyedge.models import BacktestResult, RuleCategoryPerformance, AgreementSignal
+
+            # Top 50 rules by direct PnL
+            top_direct = (await session.execute(
+                select(BacktestResult, TradingRule.name, TradingRule.rule_type,
+                       TradingRule.conditions_json, TradingRule.predicted_side)
+                .join(TradingRule, TradingRule.id == BacktestResult.rule_id)
+                .order_by(BacktestResult.pnl_direct.desc())
+                .limit(50)
+            )).all()
+
+            # Top 50 rules where inverse outperforms (flip candidates)
+            top_inverse = (await session.execute(
+                select(BacktestResult, TradingRule.name, TradingRule.rule_type,
+                       TradingRule.conditions_json, TradingRule.predicted_side)
+                .join(TradingRule, TradingRule.id == BacktestResult.rule_id)
+                .where(BacktestResult.recommended_side == "inverse")
+                .order_by(BacktestResult.pnl_inverse.desc())
+                .limit(50)
+            )).all()
+
+            # Agreement signals
+            agreement_rows = (await session.execute(
+                select(AgreementSignal).order_by(
+                    AgreementSignal.agreement_tier,
+                    AgreementSignal.pnl.desc(),
+                )
+            )).scalars().all()
+
+            # Category matrix: top rule x category combos by PnL
+            cat_matrix = (await session.execute(
+                select(RuleCategoryPerformance, TradingRule.name)
+                .join(TradingRule, TradingRule.id == RuleCategoryPerformance.rule_id)
+                .where(RuleCategoryPerformance.sample_size >= 10)
+                .order_by(RuleCategoryPerformance.pnl_direct.desc())
+                .limit(200)
+            )).all()
+
+            # Summary counts
+            total_backtested = (await session.execute(
+                select(func.count(BacktestResult.id))
+            )).scalar() or 0
+            total_flip_candidates = (await session.execute(
+                select(func.count(BacktestResult.id)).where(
+                    BacktestResult.recommended_side == "inverse"
+                )
+            )).scalar() or 0
+
+            def _bt_row(bt, name, rule_type, cond_json, pred_side):
+                return {
+                    "rule_id": bt.rule_id,
+                    "rule_name": name,
+                    "rule_type": rule_type,
+                    "predicted_side": pred_side,
+                    "total_matches": bt.total_matches,
+                    "wins_direct": bt.wins_direct,
+                    "pnl_direct": round(bt.pnl_direct, 2),
+                    "wins_inverse": bt.wins_inverse,
+                    "pnl_inverse": round(bt.pnl_inverse, 2),
+                    "recommended_side": bt.recommended_side,
+                    "edge_magnitude": round(bt.edge_magnitude, 4),
+                    "win_rate_direct": round(bt.wins_direct / bt.total_matches * 100, 1) if bt.total_matches else 0,
+                    "win_rate_inverse": round(bt.wins_inverse / bt.total_matches * 100, 1) if bt.total_matches else 0,
+                }
+
+            return {
+                "total_rules_backtested": total_backtested,
+                "total_flip_candidates": total_flip_candidates,
+                "top_rules_direct": [_bt_row(*r) for r in top_direct],
+                "top_rules_inverse": [_bt_row(*r) for r in top_inverse],
+                "agreement_tiers": [
+                    {
+                        "tier": a.agreement_tier,
+                        "category": a.category,
+                        "sample_size": a.sample_size,
+                        "wins": a.wins,
+                        "pnl": round(a.pnl, 2),
+                        "avg_pnl": round(a.avg_pnl_per_trade, 4),
+                        "win_rate_pct": round(a.wins / a.sample_size * 100, 1) if a.sample_size else 0,
+                    }
+                    for a in agreement_rows
+                ],
+                "category_matrix": [
+                    {
+                        "rule_id": rcp.rule_id,
+                        "rule_name": name,
+                        "category": rcp.category,
+                        "sample_size": rcp.sample_size,
+                        "pnl_direct": round(rcp.pnl_direct, 2),
+                        "pnl_inverse": round(rcp.pnl_inverse, 2),
+                        "recommended_side": rcp.recommended_side,
+                    }
+                    for rcp, name in cat_matrix
+                ],
+            }
+    except Exception as e:
+        log.exception("backtest_summary failed")
+        return {"error": str(e)}
 
 
 # Backward compat

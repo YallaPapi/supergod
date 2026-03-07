@@ -165,3 +165,57 @@ class ServiceHeartbeat(Base):
     details: Mapped[str] = mapped_column(Text, default="")
     last_success_at: Mapped[datetime | None] = mapped_column(DateTime)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class BacktestResult(Base):
+    """Backtest performance of a single rule against historical markets."""
+    __tablename__ = "backtest_results"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    rule_id: Mapped[int] = mapped_column(Integer, ForeignKey("trading_rules.id"), index=True)
+    total_matches: Mapped[int] = mapped_column(Integer, default=0)
+    wins_direct: Mapped[int] = mapped_column(Integer, default=0)
+    losses_direct: Mapped[int] = mapped_column(Integer, default=0)
+    pnl_direct: Mapped[float] = mapped_column(Float, default=0.0)
+    wins_inverse: Mapped[int] = mapped_column(Integer, default=0)
+    losses_inverse: Mapped[int] = mapped_column(Integer, default=0)
+    pnl_inverse: Mapped[float] = mapped_column(Float, default=0.0)
+    recommended_side: Mapped[str] = mapped_column(String(10), default="direct")
+    edge_magnitude: Mapped[float] = mapped_column(Float, default=0.0)
+    run_date: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    __table_args__ = (
+        Index("ix_bt_rule_date", "rule_id", "run_date"),
+    )
+
+
+class RuleCategoryPerformance(Base):
+    """Per-category backtest performance for a rule."""
+    __tablename__ = "rule_category_performance"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    rule_id: Mapped[int] = mapped_column(Integer, ForeignKey("trading_rules.id"), index=True)
+    category: Mapped[str] = mapped_column(String(50), index=True)
+    sample_size: Mapped[int] = mapped_column(Integer, default=0)
+    wins_direct: Mapped[int] = mapped_column(Integer, default=0)
+    pnl_direct: Mapped[float] = mapped_column(Float, default=0.0)
+    wins_inverse: Mapped[int] = mapped_column(Integer, default=0)
+    pnl_inverse: Mapped[float] = mapped_column(Float, default=0.0)
+    recommended_side: Mapped[str] = mapped_column(String(10), default="direct")
+    last_updated: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    __table_args__ = (
+        Index("ix_rcp_rule_cat", "rule_id", "category", unique=True),
+    )
+
+
+class AgreementSignal(Base):
+    """Performance stats for N-rule agreement tiers."""
+    __tablename__ = "agreement_signals"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    agreement_tier: Mapped[int] = mapped_column(Integer, index=True)
+    category: Mapped[str] = mapped_column(String(50), default="all")
+    sample_size: Mapped[int] = mapped_column(Integer, default=0)
+    wins: Mapped[int] = mapped_column(Integer, default=0)
+    pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    avg_pnl_per_trade: Mapped[float] = mapped_column(Float, default=0.0)
+    last_updated: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    __table_args__ = (
+        Index("ix_ag_tier_cat", "agreement_tier", "category", unique=True),
+    )

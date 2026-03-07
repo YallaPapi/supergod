@@ -98,6 +98,18 @@
     ::-webkit-scrollbar { width: 6px; }
     ::-webkit-scrollbar-track { background: var(--bg-1); }
     ::-webkit-scrollbar-thumb { background: var(--dim); border-radius: 3px; }
+
+    /* Tab navigation */
+    .tab-bar { display: flex; gap: 4px; margin-bottom: 16px; border-bottom: 1px solid var(--border); padding-bottom: 8px; overflow-x: auto; }
+    .tab-btn {
+      background: transparent; border: none; color: var(--muted); padding: 8px 16px;
+      font-size: 0.85rem; font-weight: 600; cursor: pointer; border-radius: 6px 6px 0 0;
+      transition: background 0.2s, color 0.2s; white-space: nowrap;
+    }
+    .tab-btn:hover { background: var(--bg-2); color: var(--fg); }
+    .tab-btn.active { background: var(--bg-2); color: var(--blue); border-bottom: 2px solid var(--blue); }
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
   </style>
 </head>
 <body>
@@ -106,6 +118,16 @@
   <h1>Poly<span>Edge</span> — Trading Intelligence</h1>
   <div class="header-meta"><span class="refresh-dot" id="refreshDot"></span>Updated: <span id="lastUpdate">--</span></div>
 </div>
+
+<div class="tab-bar" id="tabBar">
+  <button class="tab-btn active" onclick="switchTab('overview')">Overview</button>
+  <button class="tab-btn" onclick="switchTab('backtest')">Backtest Results</button>
+  <button class="tab-btn" onclick="switchTab('categories')">Categories</button>
+  <button class="tab-btn" onclick="switchTab('combinations')">Combinations</button>
+  <button class="tab-btn" onclick="switchTab('inverse')">Inverse Analysis</button>
+</div>
+
+<div class="tab-content active" id="tabOverview">
 
 <!-- HERO CARDS -->
 <div class="hero-row" id="heroRow">
@@ -277,9 +299,202 @@
   </div>
 </div>
 
+</div><!-- END tabOverview -->
+
+<!-- BACKTEST TAB -->
+<div class="tab-content" id="tabBacktest">
+  <div class="hero-row" style="grid-template-columns: 1fr 1fr 1fr">
+    <div class="hero-card">
+      <h3>Rules Backtested</h3>
+      <div class="stat-big neutral" id="btRulesCount">--</div>
+      <div class="stat-sub" id="btRulesDetail">Run backtest to populate</div>
+    </div>
+    <div class="hero-card">
+      <h3>Flip Candidates</h3>
+      <div class="stat-big neutral" id="btFlipCount">--</div>
+      <div class="stat-sub">Rules where inverse outperforms direct</div>
+    </div>
+    <div class="hero-card">
+      <h3>Best Rule PnL</h3>
+      <div class="stat-big positive" id="btBestPnl">--</div>
+      <div class="stat-sub" id="btBestRule">Loading...</div>
+    </div>
+  </div>
+  <div class="section">
+    <div class="panel">
+      <div class="panel-title">Top Rules by Backtest PnL</div>
+      <div class="panel-explain">Rules ranked by historical profit when tested against all resolved markets. Both direct and inverse PnL shown.</div>
+      <div style="overflow-x:auto; max-height:500px; overflow-y:auto;">
+        <table id="btTopRulesTable">
+          <thead><tr><th>Rule</th><th>Matches</th><th>Win Rate</th><th>Direct PnL</th><th>Inverse PnL</th><th>Best Side</th></tr></thead>
+          <tbody><tr><td colspan="6" class="empty-msg">Run backtest first. Data appears after the backtest runner processes all rules against historical markets.</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- CATEGORIES TAB -->
+<div class="tab-content" id="tabCategories">
+  <div class="section">
+    <div class="panel">
+      <div class="panel-title">Performance by Category (Live Paper Trades)</div>
+      <div class="panel-explain">How each market category performs across all strategies. Sorted by PnL. This is live paper trade data.</div>
+      <div id="catLiveTable" style="overflow-x:auto;"><div class="empty-msg">Loading...</div></div>
+    </div>
+  </div>
+  <div class="section">
+    <div class="panel">
+      <div class="panel-title">Rule x Category Matrix (Backtest)</div>
+      <div class="panel-explain">Which rules work best in which categories. Based on historical backtest of all rules against all resolved markets.</div>
+      <div id="catMatrixTable" style="overflow-x:auto; max-height:600px; overflow-y:auto;"><div class="empty-msg">Run backtest first.</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- COMBINATIONS TAB -->
+<div class="tab-content" id="tabCombinations">
+  <div class="section">
+    <div class="panel">
+      <div class="panel-title">Rule Agreement Tiers</div>
+      <div class="panel-explain">When more rules agree on a market, is the prediction better? Tier N means N or more rules predicted the same side. Higher tiers should show stronger edge.</div>
+      <div id="agreementTable" style="overflow-x:auto;"><div class="empty-msg">Run agreement analysis first.</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- INVERSE TAB -->
+<div class="tab-content" id="tabInverse">
+  <div class="hero-row" style="grid-template-columns: 1fr 1fr">
+    <div class="hero-card">
+      <h3>Live: Direct vs Inverse</h3>
+      <div id="invLiveComparison"><div class="empty-msg">Loading...</div></div>
+    </div>
+    <div class="hero-card">
+      <h3>Backtest: Flip Candidates</h3>
+      <div id="invFlipSummary"><div class="empty-msg">Run backtest first.</div></div>
+    </div>
+  </div>
+  <div class="section">
+    <div class="panel">
+      <div class="panel-title">Rules That Should Be Flipped</div>
+      <div class="panel-explain">These rules lose money when bet directly but make money when inverted. Based on backtest against all historical markets.</div>
+      <div style="overflow-x:auto; max-height:500px; overflow-y:auto;">
+        <table id="invFlipTable">
+          <thead><tr><th>Rule</th><th>Matches</th><th>Direct PnL</th><th>Inverse PnL</th><th>Difference</th></tr></thead>
+          <tbody><tr><td colspan="5" class="empty-msg">Run backtest first.</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 (function() {
   function $(id) { return document.getElementById(id); }
+
+  // --- TAB SWITCHING ---
+  window.switchTab = function(tabName) {
+    document.querySelectorAll('.tab-content').forEach(function(el) { el.classList.remove('active'); });
+    document.querySelectorAll('.tab-btn').forEach(function(el) { el.classList.remove('active'); });
+    var capName = tabName.charAt(0).toUpperCase() + tabName.slice(1);
+    var tab = $('tab' + capName);
+    if (tab) tab.classList.add('active');
+    var btns = document.querySelectorAll('.tab-btn');
+    btns.forEach(function(btn) {
+      if (btn.getAttribute('onclick') && btn.getAttribute('onclick').indexOf(tabName) !== -1) btn.classList.add('active');
+    });
+    if (tabName !== 'overview' && !window._backtestLoaded) loadBacktestData();
+  };
+
+  async function loadBacktestData() {
+    window._backtestLoaded = true;
+    var bt;
+    try {
+      var r = await fetch('/api/backtest-summary');
+      if (!r.ok) return;
+      bt = await r.json();
+    } catch(e) { return; }
+    if (!bt || bt.error) return;
+
+    // Backtest hero cards
+    $('btRulesCount').textContent = bt.total_rules_backtested != null ? Number(bt.total_rules_backtested).toLocaleString() : '--';
+    $('btFlipCount').textContent = bt.total_flip_candidates != null ? Number(bt.total_flip_candidates).toLocaleString() : '--';
+    if (bt.top_rules_direct && bt.top_rules_direct.length > 0) {
+      var best = bt.top_rules_direct[0];
+      $('btBestPnl').textContent = '$' + Number(best.pnl_direct).toFixed(2);
+      $('btBestPnl').className = 'stat-big ' + (best.pnl_direct >= 0 ? 'positive' : 'negative');
+      $('btBestRule').textContent = best.rule_name || '';
+    }
+
+    // Top rules table
+    var topBody = $('btTopRulesTable').querySelector('tbody');
+    if (bt.top_rules_direct && bt.top_rules_direct.length > 0) {
+      topBody.innerHTML = bt.top_rules_direct.map(function(r) {
+        var dPnl = Number(r.pnl_direct || 0);
+        var iPnl = Number(r.pnl_inverse || 0);
+        var dColor = dPnl >= 0 ? 'var(--green)' : 'var(--red)';
+        var iColor = iPnl >= 0 ? 'var(--green)' : 'var(--red)';
+        var bestSide = r.recommended_side === 'inverse'
+          ? '<span style="color:var(--red);font-weight:600">FLIP</span>'
+          : '<span style="color:var(--green)">Direct</span>';
+        return '<tr><td>' + (r.rule_name||'') + '</td><td>' + Number(r.total_matches||0).toLocaleString() + '</td>'
+          + '<td>' + (r.win_rate_direct||0) + '%</td>'
+          + '<td style="color:' + dColor + ';font-weight:600">$' + dPnl.toFixed(2) + '</td>'
+          + '<td style="color:' + iColor + '">$' + iPnl.toFixed(2) + '</td>'
+          + '<td>' + bestSide + '</td></tr>';
+      }).join('');
+    }
+
+    // Agreement tiers
+    var agEl = $('agreementTable');
+    var agAll = (bt.agreement_tiers || []).filter(function(a) { return a.category === 'all'; });
+    if (agAll.length > 0) {
+      var html = '<table style="width:100%;font-size:0.82rem"><thead><tr><th>Agreement Level</th><th>Markets</th><th>Wins</th><th>Win Rate</th><th>Total PnL</th><th>Avg PnL/Trade</th></tr></thead><tbody>';
+      agAll.forEach(function(a) {
+        var pnlColor = a.pnl >= 0 ? 'var(--green)' : 'var(--red)';
+        html += '<tr><td style="font-weight:600">' + a.tier + '+ rules agree</td>'
+          + '<td>' + Number(a.sample_size||0).toLocaleString() + '</td>'
+          + '<td>' + Number(a.wins||0).toLocaleString() + '</td>'
+          + '<td>' + (a.win_rate_pct||0) + '%</td>'
+          + '<td style="color:' + pnlColor + ';font-weight:600">$' + Number(a.pnl||0).toFixed(2) + '</td>'
+          + '<td>$' + Number(a.avg_pnl||0).toFixed(4) + '</td></tr>';
+      });
+      html += '</tbody></table>';
+      agEl.innerHTML = html;
+    }
+
+    // Category matrix (backtest)
+    var cmEl = $('catMatrixTable');
+    if (bt.category_matrix && bt.category_matrix.length > 0) {
+      var html2 = '<table style="width:100%;font-size:0.78rem"><thead><tr><th>Rule</th><th>Category</th><th>Samples</th><th>Direct PnL</th><th>Inverse PnL</th><th>Best</th></tr></thead><tbody>';
+      bt.category_matrix.slice(0, 100).forEach(function(c) {
+        var dColor = c.pnl_direct >= 0 ? 'var(--green)' : 'var(--red)';
+        var iColor = c.pnl_inverse >= 0 ? 'var(--green)' : 'var(--red)';
+        html2 += '<tr><td>' + (c.rule_name||'') + '</td><td>' + (c.category||'') + '</td>'
+          + '<td>' + c.sample_size + '</td>'
+          + '<td style="color:' + dColor + '">$' + Number(c.pnl_direct||0).toFixed(2) + '</td>'
+          + '<td style="color:' + iColor + '">$' + Number(c.pnl_inverse||0).toFixed(2) + '</td>'
+          + '<td>' + (c.recommended_side === 'inverse' ? '<span style="color:var(--red)">FLIP</span>' : 'Direct') + '</td></tr>';
+      });
+      html2 += '</tbody></table>';
+      cmEl.innerHTML = html2;
+    }
+
+    // Inverse flip table
+    var flipBody = $('invFlipTable').querySelector('tbody');
+    if (bt.top_rules_inverse && bt.top_rules_inverse.length > 0) {
+      $('invFlipSummary').innerHTML = '<div style="font-size:1.2rem;font-weight:700;color:var(--yellow)">' + bt.total_flip_candidates + ' rules</div><div style="font-size:0.82rem;color:var(--muted);margin-top:4px">should be flipped based on backtest</div>';
+      flipBody.innerHTML = bt.top_rules_inverse.map(function(r) {
+        var diff = Number(r.pnl_inverse) - Number(r.pnl_direct);
+        return '<tr><td>' + (r.rule_name||'') + '</td><td>' + Number(r.total_matches||0).toLocaleString() + '</td>'
+          + '<td style="color:var(--red)">$' + Number(r.pnl_direct||0).toFixed(2) + '</td>'
+          + '<td style="color:var(--green)">$' + Number(r.pnl_inverse||0).toFixed(2) + '</td>'
+          + '<td style="color:var(--green);font-weight:600">+$' + diff.toFixed(2) + '</td></tr>';
+      }).join('');
+    }
+  }
+
   function esc(s) {
     if (!s) return '';
     const d = document.createElement('div');
@@ -332,7 +547,7 @@
   }
   function renderResolvedRows(rows) {
     const tbody = $('recentResolvedTable').querySelector('tbody');
-    const srcColors = {ngram:'#4a9eff', llm:'#6c5ce7', combined:'#00b894'};
+    const srcColors = {ngram:'#4a9eff', llm:'#6c5ce7', combined:'#00b894', ngram_inverse:'#ff6b6b', llm_inverse:'#fd79a8', combined_inverse:'#e17055'};
     tbody.innerHTML = rows.map(t => {
       const result = t.won ? 'WON' : 'LOST';
       const resultCls = t.won ? 'win' : 'loss';
@@ -555,7 +770,7 @@
       srcHtml += '<div style="font-weight:600;margin-bottom:6px;color:#e0e0e0">Strategy Comparison (each strategy bets independently)</div>';
       srcHtml += '<table style="width:100%;border-collapse:collapse;font-size:0.78rem">';
       srcHtml += '<thead><tr style="color:#888;text-align:left"><th></th><th>P&L</th><th>Open Trades</th><th>Open Mkts</th><th>Closed Trades</th><th>Closed Mkts</th><th>Win Rate</th></tr></thead><tbody>';
-      for (const key of ['ngram', 'llm', 'combined']) {
+      for (const key of ['ngram', 'llm', 'combined', 'ngram_inverse', 'llm_inverse', 'combined_inverse']) {
         const s = bs[key];
         if (!s) continue;
         const pnlColor = (s.pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)';
@@ -576,6 +791,66 @@
       srcHtml += '<div style="font-size:0.7rem;color:#666;margin-top:4px;">Trade counts can exceed market counts because a strategy can place both sides or multiple entries over time.</div>';
       srcHtml += '</div>';
       $('paperDetail').innerHTML += srcHtml;
+    }
+    // Show per-category performance breakdown
+    const byCat = pt.by_category;
+    if (byCat && Object.keys(byCat).length > 0) {
+      let catHtml = '<div style="margin-top:10px;padding:10px;background:#1a1d25;border-radius:8px;font-size:0.8rem">';
+      catHtml += '<div style="font-weight:600;margin-bottom:6px;color:#e0e0e0">Performance by Category</div>';
+      catHtml += '<table style="width:100%;border-collapse:collapse;font-size:0.78rem">';
+      catHtml += '<thead><tr style="color:#888;text-align:left"><th>Category</th><th>P&L</th><th>Closed</th><th>Wins</th><th>Win Rate</th></tr></thead><tbody>';
+      const catEntries = Object.entries(byCat).sort((a,b) => (b[1].pnl||0) - (a[1].pnl||0));
+      for (const [cat, stats] of catEntries) {
+        const cc = catColors[cat] || '#7f8c8d';
+        const catLabel = (cat || 'other').replace(/_/g, ' ');
+        const pnlColor = (stats.pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)';
+        const pnlSign = (stats.pnl || 0) >= 0 ? '+' : '';
+        const wrText = stats.win_rate_pct != null ? stats.win_rate_pct + '%' : '-';
+        catHtml += `<tr>
+          <td style="padding:3px 6px"><span style="font-size:0.7rem;padding:2px 6px;border-radius:4px;background:${cc}22;color:${cc};font-weight:600;white-space:nowrap">${catLabel}</span></td>
+          <td style="padding:3px 6px;color:${pnlColor};font-weight:600">${pnlSign}$${Number(stats.pnl || 0).toFixed(2)}</td>
+          <td style="padding:3px 6px">${stats.closed || 0}</td>
+          <td style="padding:3px 6px">${stats.wins || 0}</td>
+          <td style="padding:3px 6px">${wrText}</td>
+        </tr>`;
+      }
+      catHtml += '</tbody></table></div>';
+      $('paperDetail').innerHTML += catHtml;
+    }
+
+    // --- POPULATE INVERSE TAB (live data) ---
+    const invComp = $('invLiveComparison');
+    if (bs && invComp) {
+      let invHtml = '<div style="font-size:0.82rem;line-height:2.2">';
+      [['ngram','ngram_inverse'],['llm','llm_inverse'],['combined','combined_inverse']].forEach(function(pair) {
+        const dd = bs[pair[0]] || {};
+        const ii = bs[pair[1]] || {};
+        const dPnl = Number(dd.pnl || 0);
+        const iPnl = Number(ii.pnl || 0);
+        const winner = iPnl > dPnl ? 'INVERSE' : 'DIRECT';
+        const wColor = iPnl > dPnl ? 'var(--red)' : 'var(--green)';
+        invHtml += `<div><strong>${pair[0]}:</strong> Direct <span style="color:${dPnl>=0?'var(--green)':'var(--red)'}">$${dPnl.toFixed(2)}</span> vs Inverse <span style="color:${iPnl>=0?'var(--green)':'var(--red)'}">$${iPnl.toFixed(2)}</span> → <span style="color:${wColor};font-weight:700">${winner}</span></div>`;
+      });
+      invHtml += '</div>';
+      invComp.innerHTML = invHtml;
+    }
+
+    // --- POPULATE CATEGORIES TAB (live data) ---
+    const catLiveEl = $('catLiveTable');
+    if (byCat && Object.keys(byCat).length > 0 && catLiveEl) {
+      let clHtml = '<table style="width:100%;font-size:0.82rem"><thead><tr><th>Category</th><th>PnL</th><th>Trades</th><th>Wins</th><th>Win Rate</th></tr></thead><tbody>';
+      Object.entries(byCat).sort((a,b) => (b[1].pnl||0) - (a[1].pnl||0)).forEach(function([cat, s]) {
+        const cc = catColors[cat] || '#7f8c8d';
+        const pnlColor = (s.pnl||0) >= 0 ? 'var(--green)' : 'var(--red)';
+        clHtml += `<tr>
+          <td><span style="padding:2px 8px;border-radius:4px;background:${cc}22;color:${cc};font-weight:600">${cat.replace(/_/g,' ')}</span></td>
+          <td style="color:${pnlColor};font-weight:600">$${Number(s.pnl||0).toFixed(2)}</td>
+          <td>${s.closed||0}</td><td>${s.wins||0}</td>
+          <td>${s.win_rate_pct != null ? s.win_rate_pct+'%' : '-'}</td>
+        </tr>`;
+      });
+      clHtml += '</tbody></table>';
+      catLiveEl.innerHTML = clHtml;
     }
 
     // --- OPPORTUNITIES TABLE ---
