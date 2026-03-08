@@ -7,7 +7,7 @@ import pytest
 
 from polyedge.scheduler import (
     run_forever,
-    run_llm_paper_trading,
+    run_factor_match_paper_trading,
     run_paper_trading,
     score_paper_trades,
 )
@@ -29,7 +29,7 @@ def _rows_result(rows):
 
 def test_score_paper_trades_interval_is_5_minutes():
     source = inspect.getsource(run_forever)
-    assert 'loop(score_paper_trades, 300, "score_paper_trades")' in source
+    assert 'loop(score_paper_trades, 300, "score_paper_trades"' in source
 
 
 @pytest.mark.asyncio
@@ -135,7 +135,7 @@ async def test_score_paper_trades_void_resolution_marks_resolved_without_loss():
 
 
 @pytest.mark.asyncio
-async def test_run_llm_paper_trading_trades_crypto_updown_markets():
+async def test_run_factor_match_paper_trading_trades_crypto_updown_markets():
     """crypto_updown markets are now traded (no longer skipped)."""
     session = AsyncMock()
     session.__aenter__ = AsyncMock(return_value=session)
@@ -161,13 +161,13 @@ async def test_run_llm_paper_trading_trades_crypto_updown_markets():
 
     session.execute = AsyncMock(side_effect=[
         _rows_result([(pred, market)]),  # prediction rows
-        _rows_result([]),                # existing open llm trades
-        _rows_result([]),                # existing open llm_inverse trades
+        _rows_result([]),                # existing open factor_match trades
+        _rows_result([]),                # existing open factor_match_inv trades
     ])
 
     with patch("polyedge.scheduler.SessionLocal", return_value=session):
         with patch("polyedge.scheduler._utcnow_naive", return_value=datetime(2026, 1, 1, 0, 0, 0)):
-            await run_llm_paper_trading()
+            await run_factor_match_paper_trading()
 
     # crypto_updown should now be traded, not skipped
     assert session.add.call_count >= 1, "crypto_updown market should produce trades"

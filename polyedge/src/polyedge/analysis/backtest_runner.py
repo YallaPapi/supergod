@@ -536,12 +536,15 @@ async def backtest_ngram_rules(batch_size: int = 500, n_workers: int = 0) -> dic
         batch = parsed_rules[batch_start : batch_start + batch_size]
 
         # Fan out rules to worker processes (market data sent once via initializer)
-        with ProcessPoolExecutor(
-            max_workers=n_workers,
-            initializer=_init_worker,
-            initargs=(market_dicts,),
-        ) as pool:
-            worker_results = list(pool.map(_backtest_one_rule, batch))
+        # Wrapped in to_thread so the blocking pool.map doesn't starve the event loop
+        def _run_batch(b):
+            with ProcessPoolExecutor(
+                max_workers=n_workers,
+                initializer=_init_worker,
+                initargs=(market_dicts,),
+            ) as pool:
+                return list(pool.map(_backtest_one_rule, b))
+        worker_results = await asyncio.to_thread(_run_batch, batch)
 
         # Convert worker results to ORM objects and persist
         batch_db: list[tuple[int, BacktestResult, list[RuleCategoryPerformance]]] = []

@@ -125,6 +125,7 @@
   <button class="tab-btn" onclick="switchTab('categories')">Categories</button>
   <button class="tab-btn" onclick="switchTab('combinations')">Combinations</button>
   <button class="tab-btn" onclick="switchTab('inverse')">Inverse Analysis</button>
+  <button class="tab-btn" onclick="switchTab('ruleDetails')">Rule Details</button>
 </div>
 
 <div class="tab-content active" id="tabOverview">
@@ -395,6 +396,63 @@
   </div>
 </div>
 
+<!-- RULE DETAILS TAB -->
+<div class="tab-content" id="tabRuleDetails">
+  <div class="section">
+    <div class="panel">
+      <div class="panel-title">Rule Performance by Category</div>
+      <div class="panel-explain">Every specific rule and how it performs in each market category. Shows the actual rule conditions (ngram phrase, threshold, etc.), not just "ngram". Sorted by PnL. Use this to decide which rules to keep, kill, or flip per category.</div>
+      <div style="margin-bottom:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <label style="font-size:0.78rem;color:var(--muted)">Filter category:</label>
+        <select id="rdCatFilter" onchange="filterRuleDetails()" style="background:var(--bg-2);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:0.78rem;">
+          <option value="all">All Categories</option>
+        </select>
+        <label style="font-size:0.78rem;color:var(--muted);margin-left:12px">Min trades:</label>
+        <select id="rdMinTrades" onchange="filterRuleDetails()" style="background:var(--bg-2);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:0.78rem;">
+          <option value="3">3+</option>
+          <option value="5">5+</option>
+          <option value="10" selected>10+</option>
+          <option value="20">20+</option>
+          <option value="50">50+</option>
+        </select>
+        <label style="font-size:0.78rem;color:var(--muted);margin-left:12px">Sort:</label>
+        <select id="rdSort" onchange="filterRuleDetails()" style="background:var(--bg-2);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:0.78rem;">
+          <option value="pnl">PnL (best first)</option>
+          <option value="pnl_worst">PnL (worst first)</option>
+          <option value="trades">Most trades</option>
+          <option value="win_rate">Win rate</option>
+        </select>
+      </div>
+      <div id="rdStats" style="font-size:0.78rem;color:var(--muted);margin-bottom:8px;"></div>
+      <div style="overflow-x:auto; max-height:700px; overflow-y:auto;">
+        <table id="ruleDetailsTable">
+          <thead><tr>
+            <th style="width:30%">Rule (conditions)</th>
+            <th>Type</th>
+            <th>Side</th>
+            <th>Category</th>
+            <th>Trades</th>
+            <th>Wins</th>
+            <th>Win Rate</th>
+            <th>Avg Entry</th>
+            <th>PnL</th>
+          </tr></thead>
+          <tbody><tr><td colspan="9" class="empty-msg">Loading... Click this tab to load rule performance data.</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+  <div class="section">
+    <div class="panel">
+      <div class="panel-title">Top Rules (Aggregated Across All Categories)</div>
+      <div class="panel-explain">Each rule's total performance summed across categories, with per-category breakdown. Shows which rules make money overall and where.</div>
+      <div style="overflow-x:auto; max-height:700px; overflow-y:auto;">
+        <div id="topRuleSummary"><div class="empty-msg">Loading...</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 (function() {
   function $(id) { return document.getElementById(id); }
@@ -411,6 +469,7 @@
       if (btn.getAttribute('onclick') && btn.getAttribute('onclick').indexOf(tabName) !== -1) btn.classList.add('active');
     });
     if (tabName !== 'overview' && !window._backtestLoaded) loadBacktestData();
+    if (tabName === 'ruleDetails' && !window._ruleDetailsLoaded) loadRuleDetails();
   };
 
   async function loadBacktestData() {
@@ -499,6 +558,146 @@
           + '<td style="color:var(--green);font-weight:600">+$' + diff.toFixed(2) + '</td></tr>';
       }).join('');
     }
+  }
+
+  // --- RULE DETAILS TAB ---
+  window._ruleDetailsData = null;
+  async function loadRuleDetails() {
+    window._ruleDetailsLoaded = true;
+    try {
+      var r = await fetch('/api/rule-category-performance?min_trades=3&limit=2000');
+      if (!r.ok) return;
+      var data = await r.json();
+      if (!data || data.error) {
+        $('ruleDetailsTable').querySelector('tbody').innerHTML = '<tr><td colspan="9" class="empty-msg">Error: ' + (data ? data.error : 'unknown') + '</td></tr>';
+        return;
+      }
+      window._ruleDetailsData = data;
+      // Populate category filter
+      var cats = {};
+      (data.rule_category_rows || []).forEach(function(r) { cats[r.category] = true; });
+      var sel = $('rdCatFilter');
+      sel.innerHTML = '<option value="all">All Categories</option>';
+      Object.keys(cats).sort().forEach(function(c) {
+        var opt = document.createElement('option');
+        opt.value = c;
+        opt.textContent = c.replace(/_/g, ' ');
+        sel.appendChild(opt);
+      });
+      filterRuleDetails();
+      renderTopRuleSummary(data.top_rules_summary || []);
+    } catch(e) {
+      console.error('loadRuleDetails error:', e);
+    }
+  }
+
+  window.filterRuleDetails = function() {
+    var data = window._ruleDetailsData;
+    if (!data) return;
+    var rows = data.rule_category_rows || [];
+    var catFilter = ($('rdCatFilter') || {}).value || 'all';
+    var minTrades = parseInt(($('rdMinTrades') || {}).value || '10');
+    var sortBy = ($('rdSort') || {}).value || 'pnl';
+
+    // Filter
+    var filtered = rows.filter(function(r) {
+      if (catFilter !== 'all' && r.category !== catFilter) return false;
+      if (r.trades < minTrades) return false;
+      return true;
+    });
+
+    // Sort
+    if (sortBy === 'pnl') filtered.sort(function(a,b) { return b.pnl - a.pnl; });
+    else if (sortBy === 'pnl_worst') filtered.sort(function(a,b) { return a.pnl - b.pnl; });
+    else if (sortBy === 'trades') filtered.sort(function(a,b) { return b.trades - a.trades; });
+    else if (sortBy === 'win_rate') filtered.sort(function(a,b) { return b.win_rate - a.win_rate; });
+
+    // Stats
+    var totalPnl = filtered.reduce(function(s,r) { return s + r.pnl; }, 0);
+    var totalTrades = filtered.reduce(function(s,r) { return s + r.trades; }, 0);
+    var pnlColor = totalPnl >= 0 ? 'var(--green)' : 'var(--red)';
+    $('rdStats').innerHTML = filtered.length + ' rule-category combos | ' + totalTrades + ' trades | Total PnL: <span style="color:' + pnlColor + ';font-weight:600">' + (totalPnl >= 0 ? '+' : '') + '$' + Math.abs(totalPnl).toFixed(2) + '</span>';
+
+    // Render table (max 200 rows)
+    var tbody = $('ruleDetailsTable').querySelector('tbody');
+    var display = filtered.slice(0, 200);
+    if (display.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="9" class="empty-msg">No rule-category combos match the current filters.</td></tr>';
+      return;
+    }
+    var typeColors = {ngram:'#4a9eff', single_threshold:'#e67e22', two_feature:'#9b59b6', decision_tree:'#27ae60'};
+    tbody.innerHTML = display.map(function(r) {
+      var pnlVal = Number(r.pnl || 0);
+      var pnlColor = pnlVal >= 0 ? 'var(--green)' : 'var(--red)';
+      var pnlSign = pnlVal >= 0 ? '+' : '';
+      var wrPct = (r.win_rate * 100).toFixed(1);
+      var wrColor = wrPct >= 60 ? 'var(--green)' : wrPct >= 45 ? 'var(--yellow)' : 'var(--red)';
+      var sideClass = (r.predicted_side || '').toUpperCase() === 'YES' ? 'yes' : 'no';
+      var tc = typeColors[r.rule_type] || '#888';
+      var cc = catColors[r.category] || '#7f8c8d';
+      return '<tr>'
+        + '<td style="font-size:0.78rem">' + esc(r.description) + '</td>'
+        + '<td><span style="font-size:0.68rem;padding:2px 6px;border-radius:4px;background:' + tc + '22;color:' + tc + ';font-weight:600">' + esc(r.rule_type) + '</span></td>'
+        + '<td class="col-action ' + sideClass + '">' + esc(r.predicted_side) + '</td>'
+        + '<td><span style="font-size:0.68rem;padding:2px 6px;border-radius:4px;background:' + cc + '22;color:' + cc + ';font-weight:600;white-space:nowrap">' + r.category.replace(/_/g,' ') + '</span></td>'
+        + '<td>' + r.trades + '</td>'
+        + '<td>' + r.wins + '</td>'
+        + '<td style="color:' + wrColor + ';font-weight:600">' + wrPct + '%</td>'
+        + '<td style="font-family:var(--mono)">$' + Number(r.avg_entry).toFixed(2) + '</td>'
+        + '<td style="color:' + pnlColor + ';font-weight:600;font-family:var(--mono)">' + pnlSign + '$' + Math.abs(pnlVal).toFixed(2) + '</td>'
+        + '</tr>';
+    }).join('');
+    if (filtered.length > 200) {
+      tbody.innerHTML += '<tr><td colspan="9" class="empty-msg">' + (filtered.length - 200) + ' more rows not shown. Tighten filters to see them.</td></tr>';
+    }
+  };
+
+  function renderTopRuleSummary(topRules) {
+    var el = $('topRuleSummary');
+    if (!topRules || topRules.length === 0) {
+      el.innerHTML = '<div class="empty-msg">No rules with enough data yet.</div>';
+      return;
+    }
+    var html = '';
+    topRules.slice(0, 50).forEach(function(rule) {
+      var pnl = Number(rule.total_pnl || 0);
+      var pnlColor = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+      var pnlSign = pnl >= 0 ? '+' : '';
+      var wr = rule.total_win_rate != null ? (rule.total_win_rate * 100).toFixed(1) + '%' : '-';
+      var sideClass = (rule.predicted_side || '').toUpperCase() === 'YES' ? 'yes' : 'no';
+
+      html += '<div style="background:var(--bg-2);border-radius:8px;padding:12px 16px;margin-bottom:8px">';
+      html += '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">';
+      html += '<div style="font-weight:600;font-size:0.88rem">' + esc(rule.description) + '</div>';
+      html += '<div style="display:flex;gap:16px;align-items:center;font-size:0.82rem">';
+      html += '<span class="col-action ' + sideClass + '">' + esc(rule.predicted_side) + '</span>';
+      html += '<span style="color:' + pnlColor + ';font-weight:700;font-family:var(--mono)">' + pnlSign + '$' + Math.abs(pnl).toFixed(2) + '</span>';
+      html += '<span style="color:var(--muted)">' + rule.total_trades + ' trades</span>';
+      html += '<span style="color:var(--muted)">WR: ' + wr + '</span>';
+      html += '</div></div>';
+
+      // Category breakdown
+      var cats = rule.categories || {};
+      var catKeys = Object.keys(cats).sort(function(a,b) { return (cats[b].pnl||0) - (cats[a].pnl||0); });
+      if (catKeys.length > 0) {
+        html += '<div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">';
+        catKeys.forEach(function(cat) {
+          var s = cats[cat];
+          var cp = Number(s.pnl || 0);
+          var cpColor = cp >= 0 ? 'var(--green)' : 'var(--red)';
+          var cpSign = cp >= 0 ? '+' : '';
+          var cc = catColors[cat] || '#7f8c8d';
+          html += '<span style="font-size:0.72rem;padding:3px 8px;border-radius:4px;background:' + cc + '15;border:1px solid ' + cc + '33;white-space:nowrap">';
+          html += '<span style="color:' + cc + ';font-weight:600">' + cat.replace(/_/g,' ') + '</span>';
+          html += ' <span style="color:' + cpColor + '">' + cpSign + '$' + Math.abs(cp).toFixed(2) + '</span>';
+          html += ' <span style="color:var(--muted)">(' + s.trades + 't)</span>';
+          html += '</span>';
+        });
+        html += '</div>';
+      }
+      html += '</div>';
+    });
+    el.innerHTML = html;
   }
 
   function esc(s) {
@@ -769,14 +968,14 @@
         + cohortLine(oth)
         + '</div>';
     }
-    // Show trade source experiment breakdown (ngram vs llm vs combined) — PnL first
+    // Show trade source experiment breakdown — PnL first
     const bs = pt.by_source;
     if (bs) {
       let srcHtml = '<div style="margin-top:10px;padding:10px;background:#1a1d25;border-radius:8px;font-size:0.8rem">';
       srcHtml += '<div style="font-weight:600;margin-bottom:6px;color:#e0e0e0">Strategy Comparison (each strategy bets independently)</div>';
       srcHtml += '<table style="width:100%;border-collapse:collapse;font-size:0.78rem">';
       srcHtml += '<thead><tr style="color:#888;text-align:left"><th></th><th>P&L</th><th>Open Trades</th><th>Open Mkts</th><th>Closed Trades</th><th>Closed Mkts</th><th>Win Rate</th></tr></thead><tbody>';
-      for (const key of ['ngram', 'llm', 'combined', 'ngram_inverse', 'llm_inverse', 'combined_inverse']) {
+      for (const key of ['ngram', 'factor_match', 'grok_direct', 'combined', 'ngram_inverse', 'factor_match_inv', 'grok_inv', 'combined_inverse']) {
         const s = bs[key];
         if (!s) continue;
         const pnlColor = (s.pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)';
@@ -848,7 +1047,7 @@
     const invComp = $('invLiveComparison');
     if (bs && invComp) {
       let invHtml = '<div style="font-size:0.82rem;line-height:2.2">';
-      [['ngram','ngram_inverse'],['llm','llm_inverse'],['combined','combined_inverse']].forEach(function(pair) {
+      [['ngram','ngram_inverse'],['factor_match','factor_match_inv'],['grok_direct','grok_inv'],['combined','combined_inverse']].forEach(function(pair) {
         const dd = bs[pair[0]] || {};
         const ii = bs[pair[1]] || {};
         const dPnl = Number(dd.pnl || 0);

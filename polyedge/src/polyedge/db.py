@@ -18,5 +18,11 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
-engine = create_async_engine(settings.database_url)
+engine = create_async_engine(
+    settings.database_url,
+    pool_size=20,
+    max_overflow=30,
+    pool_timeout=60,
+    pool_recycle=3600,
+)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False)

@@ -68,6 +68,24 @@ class Prediction(Base):
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime)
 
 
+class GrokPrediction(Base):
+    """Direct Grok YES/NO prediction for a market.
+
+    Unlike the factor-based Prediction table, this stores Grok's actual
+    answer to 'would you bet YES or NO on this market?'
+    """
+    __tablename__ = "grok_predictions"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    market_id: Mapped[str] = mapped_column(String, ForeignKey("markets.id"), index=True)
+    predicted_side: Mapped[str] = mapped_column(String(3))  # YES or NO
+    confidence: Mapped[float] = mapped_column(Float, default=0.5)
+    reasoning: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    __table_args__ = (
+        Index("ix_grok_pred_market_ts", "market_id", "created_at"),
+    )
+
+
 class FactorWeight(Base):
     __tablename__ = "factor_weights"
     category: Mapped[str] = mapped_column(String, primary_key=True)

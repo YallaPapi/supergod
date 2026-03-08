@@ -14,7 +14,7 @@ from polyedge.scheduler import (
     run_api_research,
     run_combined_paper_trading,
     run_forever,
-    run_llm_paper_trading,
+    run_factor_match_paper_trading,
     run_paper_trading,
     run_poller,
     run_supergod_research,
@@ -45,7 +45,7 @@ def test_scheduler_functions_exist():
 
 def test_latest_prediction_selection_orders_by_created_at_not_id():
     """Latest prediction selection must use created_at chronology, not max(id)."""
-    src_llm = inspect.getsource(run_llm_paper_trading)
+    src_llm = inspect.getsource(run_factor_match_paper_trading)
     src_combined = inspect.getsource(run_combined_paper_trading)
 
     assert "Prediction.created_at.desc()" in src_llm

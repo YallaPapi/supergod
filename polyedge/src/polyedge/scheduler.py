@@ -235,6 +235,10 @@ async def run_paper_trading():
         skipped_expired = 0
         batch_pending = 0
         for i, market in enumerate(markets):
+            # Yield event loop every 200 markets so other services aren't starved
+            if i % 200 == 0 and i > 0:
+                await asyncio.sleep(0)
+
             q_lower = (market.question or "").lower()
 
             # Skip stale markets that are already past end date.
@@ -382,11 +386,12 @@ async def run_correlation_refresh():
 
     # Global run (no category filter)
     try:
-        df = await build_matrix(limit=50000)
+        df = await build_matrix(limit=5000)
         if len(df) >= 100:
-            rules = run_discovery(df, min_samples=30, min_edge=0.05)
+            # CPU-bound discovery — run off event loop to avoid blocking other services
+            rules = await asyncio.to_thread(run_discovery, df, min_samples=30, min_edge=0.05)
             rule_dicts = [r.to_dict() for r in rules]
-            both_sides = generate_both_sides(rule_dicts)
+            both_sides = await asyncio.to_thread(generate_both_sides, rule_dicts)
             await store_rules(both_sides)
             total_stored += len(both_sides)
             log.info("Global correlation: %d rules discovered, %d stored", len(rules), len(both_sides))
@@ -396,18 +401,18 @@ async def run_correlation_refresh():
     # Per-category runs
     for cat in CATEGORIES:
         try:
-            df = await build_matrix(limit=50000, category_filter=cat)
+            df = await build_matrix(limit=5000, category_filter=cat)
             if len(df) < 50:
                 log.info("Category %s: only %d markets, skipping", cat, len(df))
                 continue
-            rules = run_discovery(df, min_samples=20, min_edge=0.05)
+            rules = await asyncio.to_thread(run_discovery, df, min_samples=20, min_edge=0.05)
             # Tag rules with market_filter
             rule_dicts = []
             for r in rules:
                 d = r.to_dict()
                 d["market_filter"] = cat
                 rule_dicts.append(d)
-            both_sides = generate_both_sides(rule_dicts)
+            both_sides = await asyncio.to_thread(generate_both_sides, rule_dicts)
             await store_rules(both_sides)
             total_stored += len(both_sides)
             log.info("Category %s: %d rules discovered, %d stored", cat, len(rules), len(both_sides))
@@ -417,8 +422,8 @@ async def run_correlation_refresh():
     log.info("Correlation refresh complete: %d total rules stored", total_stored)
 
 
-async def run_llm_paper_trading():
-    """Open paper trades based on LLM predictions (Grok/Perplexity factors).
+async def run_factor_match_paper_trading():
+    """Open paper trades based on factor-match predictions (Grok/Perplexity factors).
 
     Reads existing predictions from the predictions table. The confidence
     values are NOT probabilities — they are conviction scores (typically
@@ -426,42 +431,42 @@ async def run_llm_paper_trading():
     filter and entry price as a risk filter, not confidence-minus-price.
 
     Criteria to trade:
-    - Confidence >= 0.15 (top ~25% of predictions, system has conviction)
-    - Entry price <= 0.50 (favorable risk/reward — win big, lose small)
-    - Market ends within 48h
+    - No filters — bet on EVERY prediction, both direct and inverse
+    - More data = better category-level analysis of what to actually trade
+    - Market ends within 7 days
     """
     from polyedge.models import Market, Prediction, PaperTrade
     from sqlalchemy import func, select
 
-    MIN_CONFIDENCE = 0.15  # conviction threshold (top ~25% of predictions)
-    MAX_ENTRY_PRICE = 0.50  # risk/reward filter (win >= loss)
+    MIN_CONFIDENCE = 0.0  # no conviction filter — bet everything, track what works/inverse
     now = _utcnow_naive()
-    max_end = now + timedelta(hours=48)
+    max_end = now + timedelta(days=7)  # 7-day window (was 48h — too narrow, only 10 markets)
 
     async with SessionLocal() as session:
-        # Get the most recent prediction per market by created_at (tie-break on id).
-        latest_pred_ranked = (
+        # Get the HIGHEST-CONFIDENCE prediction per market (not most recent,
+        # because newer low-conf predictions override older high-conf ones).
+        best_pred_ranked = (
             select(
                 Prediction.id.label("prediction_id"),
                 Prediction.market_id,
                 func.row_number().over(
                     partition_by=Prediction.market_id,
-                    order_by=(Prediction.created_at.desc(), Prediction.id.desc()),
+                    order_by=(Prediction.confidence.desc(), Prediction.created_at.desc()),
                 ).label("rn"),
             )
             .subquery()
         )
 
-        # Join to get full prediction rows for markets ending within 48h
+        # Join to get full prediction rows for markets ending within 7 days
         pred_rows = (await session.execute(
             select(Prediction, Market)
             .join(
-                latest_pred_ranked,
-                Prediction.id == latest_pred_ranked.c.prediction_id,
+                best_pred_ranked,
+                Prediction.id == best_pred_ranked.c.prediction_id,
             )
             .join(Market, Market.id == Prediction.market_id)
             .where(
-                latest_pred_ranked.c.rn == 1,
+                best_pred_ranked.c.rn == 1,
                 Market.active == True,  # noqa: E712
                 Market.end_date.is_not(None),
                 Market.end_date > now,
@@ -470,7 +475,7 @@ async def run_llm_paper_trading():
         )).all()
 
         if not pred_rows:
-            log.info("LLM paper trading: 0 predictions for 48h markets")
+            log.info("Factor-match paper trading: 0 predictions for 7d markets")
             return
 
         # Pre-load existing open LLM trades
@@ -478,22 +483,23 @@ async def run_llm_paper_trading():
             select(PaperTrade.market_id, PaperTrade.side)
             .where(
                 PaperTrade.resolved == False,  # noqa: E712
-                PaperTrade.trade_source == "llm",
+                PaperTrade.trade_source == "factor_match",
             )
         )).all()
         existing: set[tuple[str, str]] = {(r[0], r[1]) for r in open_pt_rows}
 
-        # Pre-load existing open llm_inverse trades
+        # Pre-load existing open factor_match_inv trades
         open_inv_rows = (await session.execute(
             select(PaperTrade.market_id, PaperTrade.side)
             .where(
                 PaperTrade.resolved == False,  # noqa: E712
-                PaperTrade.trade_source == "llm_inverse",
+                PaperTrade.trade_source == "factor_match_inv",
             )
         )).all()
         existing_inverse: set[tuple[str, str]] = {(r[0], r[1]) for r in open_inv_rows}
 
         trades_opened = 0
+        inverse_opened = 0
         for pred, market in pred_rows:
             side = (pred.predicted_outcome or "").upper()
             if side not in ("YES", "NO"):
@@ -515,36 +521,29 @@ async def run_llm_paper_trading():
             else:
                 entry = no_price
 
-            # Only trade when entry price gives favorable risk/reward
-            if entry > MAX_ENTRY_PRICE:
-                continue
-
-            # Edge = potential win (1 - entry) vs potential loss (entry)
-            # At entry 0.30: win $0.70, lose $0.30 — great risk/reward
-            # At entry 0.50: win $0.50, lose $0.50 — breakeven risk/reward
-            edge = 1.0 - entry - entry  # net edge = win - loss = (1-entry) - entry
-
-            trade_key = (market.id, side)
-            if trade_key in existing:
-                continue
-
-            trade = PaperTrade(
-                market_id=market.id,
-                rule_id=None,
-                side=side,
-                entry_price=entry,
-                edge=edge,
-                bet_size=1.0,
-                trade_source="llm",
-                resolved=False,
-            )
-            session.add(trade)
-            existing.add(trade_key)
-            trades_opened += 1
-
-            # Inverse control: bet the opposite side at actual market price
             inv_side = "NO" if side == "YES" else "YES"
             inv_entry = no_price if side == "YES" else yes_price
+            edge = 1.0 - entry - entry
+            inv_edge = 1.0 - inv_entry - inv_entry
+
+            # Direct trade: always place, collect data on every prediction
+            trade_key = (market.id, side)
+            if trade_key not in existing:
+                trade = PaperTrade(
+                    market_id=market.id,
+                    rule_id=None,
+                    side=side,
+                    entry_price=entry,
+                    edge=edge,
+                    bet_size=1.0,
+                    trade_source="factor_match",
+                    resolved=False,
+                )
+                session.add(trade)
+                existing.add(trade_key)
+                trades_opened += 1
+
+            # Inverse trade: always place, bet the opposite side
             inv_key = (market.id, inv_side)
             if inv_key not in existing_inverse:
                 inv_trade = PaperTrade(
@@ -552,25 +551,135 @@ async def run_llm_paper_trading():
                     rule_id=None,
                     side=inv_side,
                     entry_price=inv_entry,
-                    edge=0.0,
+                    edge=inv_edge,
                     bet_size=1.0,
-                    trade_source="llm_inverse",
+                    trade_source="factor_match_inv",
                     resolved=False,
                 )
                 session.add(inv_trade)
                 existing_inverse.add(inv_key)
+                inverse_opened += 1
 
-        await _safe_commit(session, loop_name="llm_paper_trading")
+        await _safe_commit(session, loop_name="factor_match_trading")
 
-    log.info("LLM paper trading: %d new trades from %d predictions", trades_opened, len(pred_rows))
+    log.info("Factor-match paper trading: %d direct + %d inverse trades from %d predictions", trades_opened, inverse_opened, len(pred_rows))
+
+
+async def run_grok_prediction_trading():
+    """Generate Grok predictions and open paper trades for each.
+
+    This is the REAL LLM prediction system: Grok sees each market's question,
+    description, and odds, decides YES or NO, and we place both the direct
+    bet and the inverse bet. No filters — every prediction becomes two trades.
+    """
+    from polyedge.models import Market, PaperTrade, GrokPrediction
+    from polyedge.research.grok_predictor import generate_grok_predictions
+    from sqlalchemy import select
+
+    # Step 1: Generate new predictions (calls Grok API)
+    new_preds = await generate_grok_predictions()
+
+    # Step 2: Find all grok predictions that don't have trades yet
+    async with SessionLocal() as session:
+        now = _utcnow_naive()
+        cutoff = now - timedelta(days=7)
+
+        preds = (await session.execute(
+            select(GrokPrediction, Market)
+            .join(Market, Market.id == GrokPrediction.market_id)
+            .where(
+                GrokPrediction.created_at >= cutoff,
+                Market.active == True,  # noqa: E712
+                Market.end_date.is_not(None),
+                Market.end_date > now,
+            )
+        )).all()
+
+        if not preds:
+            log.info("Grok trading: 0 predictions to trade")
+            return
+
+        # Pre-load existing open trades to avoid duplicates
+        open_direct = set(
+            (r[0], r[1]) for r in (await session.execute(
+                select(PaperTrade.market_id, PaperTrade.side)
+                .where(
+                    PaperTrade.resolved == False,  # noqa: E712
+                    PaperTrade.trade_source == "grok_direct",
+                )
+            )).all()
+        )
+        open_inverse = set(
+            (r[0], r[1]) for r in (await session.execute(
+                select(PaperTrade.market_id, PaperTrade.side)
+                .where(
+                    PaperTrade.resolved == False,  # noqa: E712
+                    PaperTrade.trade_source == "grok_inv",
+                )
+            )).all()
+        )
+
+        direct_opened = 0
+        inverse_opened = 0
+
+        for pred, market in preds:
+            side = pred.predicted_side.upper()
+            if side not in ("YES", "NO"):
+                continue
+
+            yes_price = float(market.yes_price or 0.5)
+            no_price = float(market.no_price) if market.no_price is not None else max(0.001, 1.0 - yes_price)
+
+            # No price filter — user wants all data, both sides always
+
+            entry = yes_price if side == "YES" else no_price
+            inv_side = "NO" if side == "YES" else "YES"
+            inv_entry = no_price if side == "YES" else yes_price
+
+            # Direct trade — bet what Grok says
+            if (market.id, side) not in open_direct:
+                session.add(PaperTrade(
+                    market_id=market.id,
+                    rule_id=None,
+                    side=side,
+                    entry_price=entry,
+                    edge=1.0 - entry - entry,
+                    bet_size=1.0,
+                    trade_source="grok_direct",
+                    resolved=False,
+                ))
+                open_direct.add((market.id, side))
+                direct_opened += 1
+
+            # Inverse trade — bet the opposite of Grok
+            if (market.id, inv_side) not in open_inverse:
+                session.add(PaperTrade(
+                    market_id=market.id,
+                    rule_id=None,
+                    side=inv_side,
+                    entry_price=inv_entry,
+                    edge=1.0 - inv_entry - inv_entry,
+                    bet_size=1.0,
+                    trade_source="grok_inv",
+                    resolved=False,
+                ))
+                open_inverse.add((market.id, inv_side))
+                inverse_opened += 1
+
+        await _safe_commit(session, loop_name="grok_prediction_trading")
+
+    log.info(
+        "Grok trading: %d new preds, %d direct + %d inverse trades opened",
+        new_preds, direct_opened, inverse_opened,
+    )
 
 
 async def run_combined_paper_trading():
-    """Open paper trades only when BOTH ngram rules AND LLM predictions agree.
+    """Open paper trades only when BOTH ngram rules AND factor-match predictions agree.
 
     Checks markets ending within 48h. For each market, looks for:
     1. A matching ngram rule with edge >= 5%
-    2. An LLM prediction with edge >= 10%
+    2. A factor-match prediction with edge >= 10%
     If both exist and predict the SAME side, opens a combined trade.
     """
     from polyedge.models import Market, PaperTrade, Prediction, TradingRule
@@ -670,7 +779,11 @@ async def run_combined_paper_trading():
         existing_inverse: set[tuple[str, str]] = {(r[0], r[1]) for r in open_inv_rows}
 
         trades_opened = 0
-        for market in markets:
+        for i, market in enumerate(markets):
+            # Yield event loop every 200 markets so other services aren't starved
+            if i % 200 == 0 and i > 0:
+                await asyncio.sleep(0)
+
             q_lower = (market.question or "").lower()
 
             yes_price = float(market.yes_price or 0.5)
@@ -699,7 +812,7 @@ async def run_combined_paper_trading():
             if not ngram_signals:
                 continue
 
-            # Check LLM prediction (confidence is conviction, not probability)
+            # Check factor-match prediction (confidence is conviction, not probability)
             pred = preds_by_market.get(market.id)
             if pred is None:
                 continue
@@ -868,57 +981,71 @@ async def run_forever():
         return
     log.info("PolyEdge v3 scheduler starting")
 
-    async def loop(fn, interval_seconds: int, name: str):
+    async def loop(fn, interval_seconds: int, name: str, max_duration: int = 600):
+        """Run fn() every interval_seconds. Cancel if takes > max_duration seconds."""
         while True:
             try:
                 log.info("Running %s...", name)
                 await _record_heartbeat(name, "running", details="cycle_started")
-                result = await fn()
+                result = await asyncio.wait_for(fn(), timeout=max_duration)
                 await _record_heartbeat(name, "ok", details=str(result))
+            except asyncio.TimeoutError:
+                log.error("%s TIMED OUT after %ds — cancelling this cycle", name, max_duration)
+                await _record_heartbeat(name, "timeout", details=f"killed_after_{max_duration}s")
             except Exception as e:
                 log.error("%s failed: %s", name, e, exc_info=True)
-                await _record_heartbeat(name, "error", details=str(e))
-            await asyncio.sleep(interval_seconds)
+                await _record_heartbeat(name, "error", details=str(e)[:2000])
+            # Sleep in 5-min chunks, refreshing heartbeat to prevent stale indicators
+            remaining = interval_seconds
+            while remaining > 0:
+                chunk = min(remaining, 300)
+                await asyncio.sleep(chunk)
+                remaining -= chunk
+                if remaining > 0:
+                    await _record_heartbeat(name, "idle", details=f"next_run_in_{remaining}s")
 
     await asyncio.gather(
         # Core polling + scoring (every 5 min)
-        loop(poll_then_score, 300, "poller+scorer"),
+        loop(poll_then_score, 300, "poller+scorer", max_duration=300),
 
         # Prediction generation (every 1 hour, independent to prevent duplicates)
-        loop(generate_all_predictions, 3600, "predictions"),
+        loop(generate_all_predictions, 3600, "predictions", max_duration=600),
 
         # LLM API research and codex-worker distillation pipeline
-        loop(run_api_research, 1800, "api_research"),
-        loop(run_supergod_research, 1800, "supergod_dispatch"),
-        loop(ingest_supergod_research, 600, "supergod_ingest"),
+        loop(run_api_research, 1800, "api_research", max_duration=600),
+        loop(run_supergod_research, 1800, "supergod_dispatch", max_duration=300),
+        loop(ingest_supergod_research, 600, "supergod_ingest", max_duration=300),
 
         # Feature collection (every 6 hours)
-        loop(collect_daily_features, 21600, "feature_collection"),
+        loop(collect_daily_features, 21600, "feature_collection", max_duration=600),
 
         # Paper trading: ngram rules (every 5 min, 48h horizon)
-        loop(run_paper_trading, 300, "paper_trading"),
+        loop(run_paper_trading, 300, "paper_trading", max_duration=300),
 
-        # Paper trading: LLM predictions (every 5 min, 48h horizon)
-        loop(run_llm_paper_trading, 300, "llm_paper_trading"),
+        # Paper trading: factor-match predictions (every 5 min, 48h horizon)
+        loop(run_factor_match_paper_trading, 300, "factor_match_trading", max_duration=300),
+
+        # Paper trading: Grok direct predictions (every 1 hour — calls Grok API)
+        loop(run_grok_prediction_trading, 3600, "grok_prediction_trading", max_duration=1800),
 
         # Paper trading: combined ngram+LLM (every 5 min, 48h horizon)
-        loop(run_combined_paper_trading, 300, "combined_paper_trading"),
+        loop(run_combined_paper_trading, 300, "combined_paper_trading", max_duration=300),
 
         # Score paper trades (every 5 min)
-        loop(score_paper_trades, 300, "score_paper_trades"),
+        loop(score_paper_trades, 300, "score_paper_trades", max_duration=300),
 
         # Fast resolution checker — only polls markets with open trades past end_date (every 60s)
-        loop(check_resolutions, 60, "resolution_check"),
+        loop(check_resolutions, 60, "resolution_check", max_duration=120),
 
         # Correlation refresh (every 24 hours)
-        loop(run_correlation_refresh, 86400, "correlation_refresh"),
+        loop(run_correlation_refresh, 86400, "correlation_refresh", max_duration=3600),
 
         # Research-to-rules bridge (every 6 hours — 21600 seconds)
-        loop(run_research_rule_bridge, 21600, "research_rule_bridge"),
+        loop(run_research_rule_bridge, 21600, "research_rule_bridge", max_duration=1800),
 
         # Backtest refresh (weekly — 604800 seconds)
-        loop(run_backtest_refresh, 604800, "backtest_refresh"),
+        loop(run_backtest_refresh, 604800, "backtest_refresh", max_duration=3600),
 
         # Agreement analysis (daily — 86400 seconds)
-        loop(run_agreement_refresh, 86400, "agreement_refresh"),
+        loop(run_agreement_refresh, 86400, "agreement_refresh", max_duration=1800),
     )

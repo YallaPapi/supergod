@@ -7,6 +7,7 @@ stronger edge if the rules are capturing real signal.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections import defaultdict
@@ -149,7 +150,10 @@ async def run_agreement_analysis() -> dict:
         # ------------------------------------------------------------------
         market_rule_matches: dict[str, list[dict]] = defaultdict(list)
 
-        for market_id, market in markets_by_id.items():
+        for i, (market_id, market) in enumerate(markets_by_id.items()):
+            # Yield event loop every 500 markets so other services aren't starved
+            if i % 500 == 0 and i > 0:
+                await asyncio.sleep(0)
             question_lower = (market.question or "").lower()
             category = market.market_category or "unknown"
 
