@@ -156,6 +156,12 @@
     <div class="stat-big neutral" id="paperValue">--</div>
     <div class="stat-sub" id="paperDetail">Loading...</div>
   </div>
+  <!-- Crypto Up/Down isolated view -->
+  <div class="hero-card" id="cryptoCard">
+    <h3>Crypto Up/Down</h3>
+    <div class="stat-big neutral" id="cryptoValue">--</div>
+    <div class="stat-sub" id="cryptoDetail">Loading...</div>
+  </div>
 </div>
 
 <!-- RESOLUTION SCHEDULE -->
@@ -816,6 +822,26 @@
       }
       catHtml += '</tbody></table></div>';
       $('paperDetail').innerHTML += catHtml;
+    }
+
+    // --- CRYPTO UP/DOWN HERO CARD ---
+    const cryptoByCat = (byCat || {})['crypto_updown'] || {};
+    const cryptoPnl = Number(cryptoByCat.pnl || 0);
+    const cryptoEl = $('cryptoValue');
+    if (cryptoByCat.closed > 0) {
+      cryptoEl.textContent = '$' + cryptoPnl.toFixed(2);
+      cryptoEl.className = 'stat-big ' + (cryptoPnl >= 0 ? 'positive' : 'negative');
+      const cryptoWr = cryptoByCat.win_rate_pct != null ? `${cryptoByCat.win_rate_pct}% WR` : '';
+      $('cryptoDetail').innerHTML =
+        `${cryptoByCat.closed} resolved, ${cryptoByCat.open || 0} open${cryptoWr ? ' | ' + cryptoWr : ''}`;
+    } else if (cryptoByCat.open > 0) {
+      cryptoEl.textContent = cryptoByCat.open + ' open';
+      cryptoEl.className = 'stat-big neutral';
+      $('cryptoDetail').textContent = 'Waiting for resolutions...';
+    } else {
+      cryptoEl.textContent = '--';
+      cryptoEl.className = 'stat-big neutral';
+      $('cryptoDetail').textContent = 'No crypto up/down trades yet';
     }
 
     // --- POPULATE INVERSE TAB (live data) ---

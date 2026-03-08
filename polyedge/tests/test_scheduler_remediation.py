@@ -49,6 +49,7 @@ async def test_run_paper_trading_skips_expired_market():
         sample_size=800,
         active=True,
         rule_type="ngram",
+        market_filter="",
     )
     expired_market = SimpleNamespace(
         id="m1",
@@ -65,7 +66,8 @@ async def test_run_paper_trading_skips_expired_market():
     session.execute = AsyncMock(side_effect=[
         _scalars_result([rule]),     # rules
         _scalars_result([expired_market]),  # markets
-        _rows_result([]),            # open paper-trade keys
+        _rows_result([]),            # open ngram paper-trade keys
+        _rows_result([]),            # open ngram_inverse paper-trade keys
     ])
 
     with patch("polyedge.scheduler.SessionLocal", return_value=session):
@@ -133,7 +135,8 @@ async def test_score_paper_trades_void_resolution_marks_resolved_without_loss():
 
 
 @pytest.mark.asyncio
-async def test_run_llm_paper_trading_skips_crypto_updown_markets():
+async def test_run_llm_paper_trading_trades_crypto_updown_markets():
+    """crypto_updown markets are now traded (no longer skipped)."""
     session = AsyncMock()
     session.__aenter__ = AsyncMock(return_value=session)
     session.__aexit__ = AsyncMock(return_value=False)
@@ -159,11 +162,13 @@ async def test_run_llm_paper_trading_skips_crypto_updown_markets():
     session.execute = AsyncMock(side_effect=[
         _rows_result([(pred, market)]),  # prediction rows
         _rows_result([]),                # existing open llm trades
+        _rows_result([]),                # existing open llm_inverse trades
     ])
 
     with patch("polyedge.scheduler.SessionLocal", return_value=session):
         with patch("polyedge.scheduler._utcnow_naive", return_value=datetime(2026, 1, 1, 0, 0, 0)):
             await run_llm_paper_trading()
 
-    session.add.assert_not_called()
+    # crypto_updown should now be traded, not skipped
+    assert session.add.call_count >= 1, "crypto_updown market should produce trades"
     session.commit.assert_awaited_once()

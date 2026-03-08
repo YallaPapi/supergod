@@ -91,32 +91,54 @@ async def score_resolved_markets():
 
 
 async def recalculate_weights():
+    """Recalculate factor weights grouped by (factor_category, market_category).
+
+    Each prediction is linked to a market (which has a market_category) and
+    tracks which factor categories contributed (factor_categories JSON field).
+    We compute one weight row per (factor_cat, market_cat) pair, plus an
+    aggregated "all" row per factor_cat for backward compatibility.
+    """
     async with SessionLocal() as session:
-        stmt = select(Prediction).where(Prediction.correct != None)
+        stmt = (
+            select(Prediction, Market.market_category)
+            .join(Market, Market.id == Prediction.market_id)
+            .where(Prediction.correct != None)  # noqa: E711
+        )
         cutoff = prediction_metrics_cutoff()
         if cutoff is not None:
             stmt = stmt.where(Prediction.created_at >= cutoff)
-        scored = (await session.execute(stmt)).scalars().all()
+        scored = (await session.execute(stmt)).all()
 
-    cat_stats: dict[str, dict] = {}
-    for pred in scored:
+    # Group by (factor_category, market_category)
+    cat_stats: dict[tuple[str, str], dict] = {}
+    for pred, mkt_cat in scored:
         cats = json.loads(pred.factor_categories) if pred.factor_categories else []
-        for cat in cats:
-            if cat not in cat_stats:
-                cat_stats[cat] = {"correct": 0, "total": 0}
-            cat_stats[cat]["total"] += 1
+        market_cat = (mkt_cat or "other").strip().lower() or "other"
+        for fcat in cats:
+            # Per market_category row
+            key = (fcat, market_cat)
+            if key not in cat_stats:
+                cat_stats[key] = {"correct": 0, "total": 0}
+            cat_stats[key]["total"] += 1
             if pred.correct:
-                cat_stats[cat]["correct"] += 1
+                cat_stats[key]["correct"] += 1
+            # Aggregated "all" row
+            all_key = (fcat, "all")
+            if all_key not in cat_stats:
+                cat_stats[all_key] = {"correct": 0, "total": 0}
+            cat_stats[all_key]["total"] += 1
+            if pred.correct:
+                cat_stats[all_key]["correct"] += 1
 
     async with SessionLocal() as session:
-        for cat, stats in cat_stats.items():
+        for (fcat, mcat), stats in cat_stats.items():
             scores = score_category(stats["correct"], stats["total"])
-            existing = await session.get(FactorWeight, cat)
+            existing = await session.get(FactorWeight, (fcat, mcat))
             if existing:
                 for k, v in scores.items():
                     setattr(existing, k, v)
                 existing.updated_at = datetime.utcnow()
             else:
-                session.add(FactorWeight(category=cat, **scores))
+                session.add(FactorWeight(category=fcat, market_category=mcat, **scores))
         await session.commit()
-    log.info("Recalculated weights for %d categories", len(cat_stats))
+    log.info("Recalculated weights for %d (factor_cat, market_cat) pairs", len(cat_stats))

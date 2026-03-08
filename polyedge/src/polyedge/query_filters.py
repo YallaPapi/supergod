@@ -24,7 +24,7 @@ def real_trade_predicates(
     require_future_end: bool = False,
 ) -> list:
     """Canonical predicate set for user-facing paper-trade metrics."""
-    predicates: list = [PaperTrade.entry_price > 0.02, ~noise_market_predicate()]
+    predicates: list = [PaperTrade.entry_price > 0.02]
 
     if resolved is not None:
         predicates.append(PaperTrade.resolved == resolved)  # noqa: E712

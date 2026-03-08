@@ -21,8 +21,8 @@ def test_real_trade_predicates_include_core_filters():
     sql = str(stmt.compile(compile_kwargs={"literal_binds": True})).lower()
 
     assert "paper_trades.entry_price > 0.02" in sql
-    assert "up or down" in sql
-    assert "markets.market_category = 'crypto_updown'" in sql
+    # Noise filter removed — crypto_updown now included in all metrics
+    assert "up or down" not in sql
     assert "paper_trades.resolved = false" in sql
     assert "markets.end_date >=" in sql
 

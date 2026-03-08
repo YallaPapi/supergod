@@ -47,8 +47,12 @@ async def _get_existing_ngram_phrases() -> set[str]:
     return phrases
 
 
-async def generate_rules_from_research() -> dict:
+async def generate_rules_from_research(category_filter: str | None = None) -> dict:
     """Check for new research factors and generate rules from them.
+
+    Args:
+        category_filter: If set, only mine ngrams from markets in this category
+                         and tag resulting rules with market_filter=category_filter.
 
     1. Count factors added in the last 6 hours
     2. If new factors exist, re-mine ngrams from all resolved markets
@@ -70,7 +74,7 @@ async def generate_rules_from_research() -> dict:
     log.info("Research bridge: %d new factors found, re-mining ngrams", new_factor_count)
 
     # Re-run ngram mining (updates ngram_stats table)
-    await run_ngram_mining()
+    await run_ngram_mining(category_filter=category_filter)
 
     # Load existing ngram rule phrases to skip duplicates
     existing_phrases = await _get_existing_ngram_phrases()
@@ -126,7 +130,7 @@ async def generate_rules_from_research() -> dict:
             "predicted_side": side,
             "win_rate": round(float(wr), 4),
             "sample_size": ng["total_markets"],
-            "market_filter": "",
+            "market_filter": category_filter or "",
         })
 
     if not candidate_rules:

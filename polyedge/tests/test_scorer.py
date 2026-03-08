@@ -196,3 +196,19 @@ def test_parse_resolution_sources_csv_and_wildcard():
         "polymarket_api", "manual_override",
     }
     assert _parse_resolution_sources("*") == {"*"}
+
+
+def test_score_category_math():
+    from polyedge.analysis.scorer import score_category
+    result = score_category(correct=60, total=100)
+    assert result["hit_rate"] == 0.6
+    assert result["total_predictions"] == 100
+    assert result["correct_predictions"] == 60
+    # weight for 60% hit rate: 1.0 + (0.6 - 0.5) * 4 = 1.4
+    assert abs(result["weight"] - 1.4) < 0.01
+
+
+def test_score_category_below_50():
+    from polyedge.analysis.scorer import score_category
+    result = score_category(correct=40, total=100)
+    assert result["weight"] == 0.1  # <= 50% gets downweighted

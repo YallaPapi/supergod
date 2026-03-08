@@ -56,14 +56,6 @@ def _scheduler_host_allowed() -> bool:
     return True
 
 
-def _is_noise_market(market) -> bool:
-    """Return True for high-frequency crypto up/down markets."""
-    market_category = (getattr(market, "market_category", "") or "").strip().lower()
-    if market_category == "crypto_updown":
-        return True
-    q_lower = (getattr(market, "question", "") or "").lower()
-    return "up or down" in q_lower
-
 
 async def _safe_commit(session, *, loop_name: str) -> bool:
     """Commit and gracefully handle duplicate-open-trade races."""
@@ -202,6 +194,7 @@ async def run_paper_trading():
                 "win_rate": r.win_rate, "breakeven": r.breakeven_price or r.win_rate,
                 "tier": tier,
                 "min_edge": MIN_EDGE_TIER1 if tier == 1 else MIN_EDGE_TIER2,
+                "market_filter": (r.market_filter or "").strip(),
             })
         log.info("Loaded %d ngram rules for paper trading", len(parsed_rules))
 
@@ -239,16 +232,10 @@ async def run_paper_trading():
         existing_inverse: set[tuple[str, str]] = {(r[0], r[1]) for r in open_inv_rows}
 
         trades_opened = 0
-        skipped_noise = 0
         skipped_expired = 0
         batch_pending = 0
         for i, market in enumerate(markets):
             q_lower = (market.question or "").lower()
-
-            # Skip high-frequency noise markets (5-min crypto predictions etc.)
-            if _is_noise_market(market):
-                skipped_noise += 1
-                continue
 
             # Skip stale markets that are already past end date.
             if market.end_date is not None and market.end_date < now:
@@ -266,6 +253,10 @@ async def run_paper_trading():
             best_by_side: dict[str, dict] = {}  # side -> best match
             for rule in parsed_rules:
                 if rule["phrase"] not in q_lower:
+                    continue
+                # Enforce category scope
+                mf = rule["market_filter"]
+                if mf and mf != (getattr(market, "market_category", "") or ""):
                     continue
                 side = rule["side"]
                 entry = yes_price if side == "YES" else no_price
@@ -330,8 +321,8 @@ async def run_paper_trading():
             await _safe_commit(session, loop_name="paper_trading")
 
     log.info(
-        "Paper trading complete: %d new trades from %d markets (skipped %d noise, %d expired)",
-        trades_opened, len(markets), skipped_noise, skipped_expired,
+        "Paper trading complete: %d new trades from %d markets (skipped %d expired)",
+        trades_opened, len(markets), skipped_expired,
     )
 
 
@@ -374,34 +365,56 @@ async def score_paper_trades():
         log.info("Scored %d paper trades", scored)
 
 
+CATEGORIES = [
+    "crypto_updown", "sports_ou", "sports_spread", "crypto_other",
+    "sports_winner", "politics_us", "sports_props", "entertainment",
+    "politics_intl", "science_tech", "economics", "other",
+]
+
+
 async def run_correlation_refresh():
-    """Re-run correlation engine with latest data (weekly)."""
-    log.info("Starting correlation refresh...")
+    """Re-run correlation engine: once globally, then once per category."""
+    from polyedge.analysis.feature_matrix import build_matrix
+    from polyedge.analysis.correlation_engine import run_discovery
+    from polyedge.analysis.rule_generator import generate_both_sides, store_rules
+
+    total_stored = 0
+
+    # Global run (no category filter)
     try:
-        from polyedge.analysis.feature_matrix import build_matrix
-        from polyedge.analysis.correlation_engine import run_discovery
-        from polyedge.analysis.rule_generator import generate_both_sides, store_rules
-
-        # Build matrix
-        df = await build_matrix(limit=50000)  # limit for performance
-        if len(df) < 100:
-            log.warning("Not enough data for correlation (%d rows)", len(df))
-            return
-
-        # Run discovery
-        rules = run_discovery(df, min_samples=30, min_edge=0.05)
-        log.info("Discovered %d rules", len(rules))
-
-        # Generate both sides
-        rule_dicts = [r.to_dict() for r in rules]
-        both_sides = generate_both_sides(rule_dicts)
-
-        # Store
-        await store_rules(both_sides)
-        log.info("Stored %d rules (both sides)", len(both_sides))
-
+        df = await build_matrix(limit=50000)
+        if len(df) >= 100:
+            rules = run_discovery(df, min_samples=30, min_edge=0.05)
+            rule_dicts = [r.to_dict() for r in rules]
+            both_sides = generate_both_sides(rule_dicts)
+            await store_rules(both_sides)
+            total_stored += len(both_sides)
+            log.info("Global correlation: %d rules discovered, %d stored", len(rules), len(both_sides))
     except Exception as e:
-        log.error("Correlation refresh failed: %s", e, exc_info=True)
+        log.error("Global correlation failed: %s", e, exc_info=True)
+
+    # Per-category runs
+    for cat in CATEGORIES:
+        try:
+            df = await build_matrix(limit=50000, category_filter=cat)
+            if len(df) < 50:
+                log.info("Category %s: only %d markets, skipping", cat, len(df))
+                continue
+            rules = run_discovery(df, min_samples=20, min_edge=0.05)
+            # Tag rules with market_filter
+            rule_dicts = []
+            for r in rules:
+                d = r.to_dict()
+                d["market_filter"] = cat
+                rule_dicts.append(d)
+            both_sides = generate_both_sides(rule_dicts)
+            await store_rules(both_sides)
+            total_stored += len(both_sides)
+            log.info("Category %s: %d rules discovered, %d stored", cat, len(rules), len(both_sides))
+        except Exception as e:
+            log.error("Category %s correlation failed: %s", cat, e, exc_info=True)
+
+    log.info("Correlation refresh complete: %d total rules stored", total_stored)
 
 
 async def run_llm_paper_trading():
@@ -482,9 +495,6 @@ async def run_llm_paper_trading():
 
         trades_opened = 0
         for pred, market in pred_rows:
-            if _is_noise_market(market):
-                continue
-
             side = (pred.predicted_outcome or "").upper()
             if side not in ("YES", "NO"):
                 continue
@@ -598,6 +608,7 @@ async def run_combined_paper_trading():
             parsed_rules.append({
                 "id": r.id, "phrase": phrase, "side": r.predicted_side,
                 "win_rate": r.win_rate, "breakeven": r.breakeven_price or r.win_rate,
+                "market_filter": (r.market_filter or "").strip(),
             })
 
         # Load markets ending within 48h
@@ -661,8 +672,6 @@ async def run_combined_paper_trading():
         trades_opened = 0
         for market in markets:
             q_lower = (market.question or "").lower()
-            if _is_noise_market(market):
-                continue
 
             yes_price = float(market.yes_price or 0.5)
             no_price = float(market.no_price) if market.no_price is not None else max(0.001, 1.0 - yes_price)
@@ -673,6 +682,10 @@ async def run_combined_paper_trading():
             ngram_signals: dict[str, dict] = {}
             for rule in parsed_rules:
                 if rule["phrase"] not in q_lower:
+                    continue
+                # Enforce category scope
+                mf = rule["market_filter"]
+                if mf and mf != (getattr(market, "market_category", "") or ""):
                     continue
                 side = rule["side"]
                 entry = yes_price if side == "YES" else no_price
@@ -761,8 +774,8 @@ async def check_resolutions():
     # Prioritize the most recently ended markets so today's trades get resolved first,
     # not blocked behind months-old stuck markets.
     async with SessionLocal() as session:
-        pending_ids = (await session.execute(
-            select(Market.id)
+        pending_rows = (await session.execute(
+            select(Market.id, Market.end_date)
             .join(PaperTrade, PaperTrade.market_id == Market.id)
             .where(
                 PaperTrade.resolved == False,  # noqa: E712
@@ -773,7 +786,8 @@ async def check_resolutions():
             .distinct()
             .order_by(Market.end_date.desc())
             .limit(500)
-        )).scalars().all()
+        )).all()
+        pending_ids = [row[0] for row in pending_rows]
 
     if not pending_ids:
         log.info("Resolution check: 0 markets pending")
@@ -813,10 +827,21 @@ async def check_resolutions():
 
 
 async def run_research_rule_bridge():
-    """Generate new rules from recent research factors."""
+    """Generate new rules from recent research factors — global + per-category."""
     from polyedge.analysis.research_rule_bridge import generate_rules_from_research
+
+    # Global run
     stats = await generate_rules_from_research()
-    log.info("Research-to-rules bridge: %s", stats)
+    log.info("Research-to-rules bridge (global): %s", stats)
+
+    # Per-category runs
+    for cat in CATEGORIES:
+        try:
+            cat_stats = await generate_rules_from_research(category_filter=cat)
+            if cat_stats.get("new_rules", 0) > 0:
+                log.info("Research-to-rules bridge (%s): %s", cat, cat_stats)
+        except Exception as e:
+            log.error("Research rule bridge for %s failed: %s", cat, e, exc_info=True)
 
 
 async def run_backtest_refresh():

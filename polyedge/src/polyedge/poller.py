@@ -27,15 +27,24 @@ def parse_market(raw: dict) -> dict:
     else:
         end_date = None
     closed = raw.get("closed", False)
+    resolved_by = raw.get("resolvedBy") or ""
     # Detect resolution from outcome prices: [1, 0] = YES, [0, 1] = NO
+    # Also detect when resolvedBy is set (market resolved but closed=false sometimes)
     resolution = None
     resolution_source = ""
-    if closed:
+    is_settled = closed or bool(resolved_by)
+    if is_settled:
         if yes_price >= 0.99:
             resolution = "YES"
             resolution_source = "polymarket_api"
         elif no_price >= 0.99:
             resolution = "NO"
+            resolution_source = "polymarket_api"
+        elif yes_price <= 0.01:
+            resolution = "NO"
+            resolution_source = "polymarket_api"
+        elif no_price <= 0.01:
+            resolution = "YES"
             resolution_source = "polymarket_api"
     from polyedge.analysis.market_classifier import classify_market
     question = raw.get("question", "")
@@ -51,8 +60,8 @@ def parse_market(raw: dict) -> dict:
         "no_price": no_price,
         "volume": float(raw.get("volume", 0)),
         "liquidity": float(raw.get("liquidity", 0)),
-        "active": raw.get("active", True) and not closed,
-        "resolved": closed,
+        "active": raw.get("active", True) and not is_settled,
+        "resolved": is_settled or bool(resolution),
         "resolution": resolution,
         "resolution_source": resolution_source,
         "clob_token_ids": str(raw.get("clobTokenIds", [])),

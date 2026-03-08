@@ -2045,11 +2045,25 @@ async def backtest_summary():
         async with SessionLocal() as session:
             from polyedge.models import BacktestResult, RuleCategoryPerformance, AgreementSignal
 
-            # Top 50 rules by direct PnL
+            # Top 50 rules by direct PnL — use latest backtest result per rule
+            from sqlalchemy import func as sqfunc
+            latest_bt = (
+                select(
+                    BacktestResult.rule_id,
+                    sqfunc.max(BacktestResult.run_date).label("max_run_date"),
+                )
+                .group_by(BacktestResult.rule_id)
+                .subquery()
+            )
             top_direct = (await session.execute(
                 select(BacktestResult, TradingRule.name, TradingRule.rule_type,
                        TradingRule.conditions_json, TradingRule.predicted_side)
                 .join(TradingRule, TradingRule.id == BacktestResult.rule_id)
+                .join(
+                    latest_bt,
+                    (BacktestResult.rule_id == latest_bt.c.rule_id) &
+                    (BacktestResult.run_date == latest_bt.c.max_run_date),
+                )
                 .order_by(BacktestResult.pnl_direct.desc())
                 .limit(50)
             )).all()
@@ -2059,6 +2073,11 @@ async def backtest_summary():
                 select(BacktestResult, TradingRule.name, TradingRule.rule_type,
                        TradingRule.conditions_json, TradingRule.predicted_side)
                 .join(TradingRule, TradingRule.id == BacktestResult.rule_id)
+                .join(
+                    latest_bt,
+                    (BacktestResult.rule_id == latest_bt.c.rule_id) &
+                    (BacktestResult.run_date == latest_bt.c.max_run_date),
+                )
                 .where(BacktestResult.recommended_side == "inverse")
                 .order_by(BacktestResult.pnl_inverse.desc())
                 .limit(50)

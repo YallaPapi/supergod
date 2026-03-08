@@ -71,6 +71,7 @@ class Prediction(Base):
 class FactorWeight(Base):
     __tablename__ = "factor_weights"
     category: Mapped[str] = mapped_column(String, primary_key=True)
+    market_category: Mapped[str] = mapped_column(String(50), primary_key=True, default="all")
     total_predictions: Mapped[int] = mapped_column(Integer, default=0)
     correct_predictions: Mapped[int] = mapped_column(Integer, default=0)
     hit_rate: Mapped[float] = mapped_column(Float, default=0.5)

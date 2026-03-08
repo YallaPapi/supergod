@@ -38,7 +38,7 @@ async def test_generate_creates_prediction_when_market_has_factors_and_no_recent
         confidence=0.8,
         market_id="m1",
     )
-    weight = SimpleNamespace(category="weather", weight=1.5)
+    weight = SimpleNamespace(category="weather", market_category="all", weight=1.5)
 
     session.execute = AsyncMock(side_effect=[
         _scalars_result([weight]),
@@ -129,3 +129,20 @@ def test_predict_from_factors_normalizes_categories_to_lowercase():
         weights={"social media": 1.0},
     )
     assert signal["factor_categories"] == ["social media"]
+
+
+def test_predict_from_factors_uses_weights():
+    """Higher weight for a category should produce higher confidence."""
+    f1 = SimpleNamespace(
+        id="f1", category="sentiment", subcategory="", name="bullish",
+        value="bullish", confidence=0.8, market_id="m1"
+    )
+    # With high weight for sentiment → should push prediction toward YES
+    result_high = _predict_from_factors(
+        factors=[f1], market_yes_price=0.5, weights={"sentiment": 3.0}
+    )
+    # With low weight for sentiment → prediction should be closer to 0.5
+    result_low = _predict_from_factors(
+        factors=[f1], market_yes_price=0.5, weights={"sentiment": 0.1}
+    )
+    assert result_high["confidence"] > result_low["confidence"]

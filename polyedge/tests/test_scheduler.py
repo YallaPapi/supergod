@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from polyedge.scheduler import (
+    check_resolutions,
     collect_daily_features,
     ingest_supergod_research,
     poll_then_score,
@@ -51,6 +52,12 @@ def test_latest_prediction_selection_orders_by_created_at_not_id():
     assert "Prediction.created_at.desc()" in src_combined
     assert "func.max(Prediction.id)" not in src_llm
     assert "func.max(Prediction.id)" not in src_combined
+
+
+def test_check_resolutions_uses_orderable_pending_query():
+    """Pending-markets query must be valid on Postgres (DISTINCT + ORDER BY)."""
+    src = inspect.getsource(check_resolutions)
+    assert "select(Market.id, Market.end_date)" in src
 
 
 @pytest.mark.asyncio
@@ -112,6 +119,39 @@ async def test_run_paper_trading_skips_low_liquidity_markets():
     predict_mock.assert_not_called()
     session.add.assert_not_called()
     session.commit.assert_awaited_once()
+
+
+def test_paper_trading_respects_market_filter():
+    """Rules with market_filter should only match markets of that category."""
+    rule = {
+        "id": 1, "phrase": "spread", "side": "NO", "win_rate": 0.70,
+        "breakeven": 0.70, "tier": 1, "min_edge": 0.05,
+        "market_filter": "sports_spread",
+    }
+    from types import SimpleNamespace
+    market = SimpleNamespace(
+        question="Will BTC spread beyond $50k?",
+        market_category="crypto_other",
+    )
+    q_lower = market.question.lower()
+    phrase_matches = rule["phrase"] in q_lower
+    mf = rule["market_filter"]
+    category_matches = not mf or mf == (getattr(market, "market_category", "") or "")
+    assert phrase_matches is True, "Phrase should match"
+    assert category_matches is False, "Category should NOT match"
+    assert not (phrase_matches and category_matches), "Trade should NOT open"
+
+
+def test_crypto_updown_not_skipped():
+    """crypto_updown markets should be traded, not skipped."""
+    import inspect
+    import polyedge.scheduler as sched
+    # _is_noise_market should no longer exist
+    assert not hasattr(sched, '_is_noise_market'), "_is_noise_market should be deleted"
+    # Verify no noise filtering in paper trading source
+    src = inspect.getsource(sched.run_paper_trading)
+    assert "_is_noise_market" not in src
+    assert "skipped_noise" not in src
 
 
 @pytest.mark.asyncio

@@ -83,10 +83,16 @@ def build_research_prompt(
     )
 
 
-async def submit_to_supergod(prompt: str, orchestrator_url: str = "ws://89.167.99.187:8080") -> str | None:
+async def submit_to_supergod(prompt: str, orchestrator_url: str = "ws://89.167.99.187:8080/ws/client") -> str | None:
     import websockets
     try:
-        async with websockets.connect(f"{orchestrator_url}/ws/client", close_timeout=10) as ws:
+        url = (orchestrator_url or "").strip()
+        if not url:
+            url = "ws://89.167.99.187:8080/ws/client"
+        if not url.endswith("/ws/client"):
+            url = f"{url.rstrip('/')}/ws/client"
+
+        async with websockets.connect(url, close_timeout=10) as ws:
             msg = json.dumps({"type": "task", "prompt": prompt, "priority": 1})
             await ws.send(msg)
             resp = json.loads(await ws.recv())
