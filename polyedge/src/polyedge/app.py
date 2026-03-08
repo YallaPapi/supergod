@@ -4,10 +4,10 @@ from datetime import datetime, timedelta, timezone
 import os
 import socket
 
-from fastapi import FastAPI
+from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
-from sqlalchemy import select, func, desc, text, case, cast, Numeric
+from sqlalchemy import select, func, desc, text, case, cast, Numeric, delete
 from polyedge.db import SessionLocal
 from polyedge.analysis.scorer import prediction_metrics_cutoff
 from polyedge.db import settings as db_settings
@@ -15,6 +15,7 @@ from polyedge.query_filters import noise_market_predicate, real_trade_predicates
 from polyedge.models import (
     Market, TradingRule, PaperTrade, DailyFeature,
     NgramStat, Prediction, Factor, FactorWeight, PriceSnapshot, ServiceHeartbeat,
+    StrategyProfile, StrategyProfileRule,
 )
 import json
 import pathlib
@@ -102,6 +103,16 @@ app = FastAPI(title="PolyEdge v3")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
 )
+
+
+@app.middleware("http")
+async def disable_api_cache(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/api/") or request.url.path == "/":
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
 
 
 def _utcnow_naive() -> datetime:
@@ -207,6 +218,79 @@ def _minutes_since(ts: datetime | None, now: datetime) -> int | None:
     if ts is None:
         return None
     return max(0, int((now - ts).total_seconds() // 60))
+
+
+_DIRECT_TRADE_SOURCES = ("ngram", "factor_match", "grok_direct", "combined")
+_INVERSE_TRADE_SOURCES = ("ngram_inverse", "factor_match_inv", "grok_inv", "combined_inverse")
+_ALL_TRACKED_TRADE_SOURCES = _DIRECT_TRADE_SOURCES + _INVERSE_TRADE_SOURCES
+
+
+def _compute_source_derived_metrics(
+    *,
+    closed: int,
+    wins: int,
+    pnl: float,
+    open_count: int,
+    avg_entry_open: float | None,
+    avg_entry_closed: float | None,
+) -> dict[str, float | None]:
+    if closed <= 0:
+        return {
+            "win_rate_pct": None,
+            "pnl_per_bet": None,
+            "ev_per_bet": None,
+            "expected_open_pnl": None,
+        }
+    win_rate = wins / closed
+    pnl_per_bet = pnl / closed
+    reference_entry = avg_entry_open if avg_entry_open is not None else avg_entry_closed
+    ev_per_bet = (win_rate - reference_entry) if reference_entry is not None else None
+    expected_open_pnl = (ev_per_bet * open_count) if ev_per_bet is not None else None
+    return {
+        "win_rate_pct": round(win_rate * 100, 1),
+        "pnl_per_bet": pnl_per_bet,
+        "ev_per_bet": ev_per_bet,
+        "expected_open_pnl": expected_open_pnl,
+    }
+
+
+_KNOWN_SCHEDULER_SERVICES = {
+    "poller+scorer",
+    "predictions",
+    "api_research",
+    "supergod_dispatch",
+    "supergod_ingest",
+    "feature_collection",
+    "paper_trading",
+    "factor_match_trading",
+    "grok_prediction_trading",
+    "combined_paper_trading",
+    "profile_paper_trading",
+    "score_paper_trades",
+    "resolution_check",
+    "correlation_refresh",
+    "research_rule_bridge",
+    "backtest_refresh",
+    "agreement_refresh",
+}
+
+
+def _select_relevant_heartbeats(heartbeats: list[ServiceHeartbeat], now: datetime) -> list[ServiceHeartbeat]:
+    """Hide long-stale legacy heartbeat names so runtime cards stay meaningful."""
+    selected: list[ServiceHeartbeat] = []
+    for hb in heartbeats:
+        age = _minutes_since(hb.updated_at, now) if hb.updated_at else None
+        if hb.service in _KNOWN_SCHEDULER_SERVICES:
+            selected.append(hb)
+            continue
+        if age is not None and age <= 120:
+            selected.append(hb)
+    return selected
+
+
+_HUMAN_DASHBOARD_CACHE_TTL_SECONDS = 90
+_human_dashboard_cache_payload: dict | None = None
+_human_dashboard_cache_updated_at: datetime | None = None
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -357,7 +441,7 @@ async def dashboard_summary():
             dup_groups = sum(1 for _, _, _, count in dup_rows if (count or 0) > 1)
             duplicate_prediction_rate = (dup_groups / dup_total) if dup_total else None
 
-            return {
+            result = {
                 "total_markets": total_markets,
                 "active_markets": active_markets,
                 "active_rules": total_rules,
@@ -393,6 +477,7 @@ async def dashboard_summary():
                 ),
                 "prediction_metrics_cutoff": str(cutoff) if cutoff else None,
             }
+            return result
     except Exception as e:
         log.exception("dashboard_summary failed")
         return {
@@ -654,7 +739,7 @@ async def mission_control():
             else:
                 summary_lines.append(f"Freshness: latest predictions {prediction_age_minutes} min ago.")
 
-            return {
+            result = {
                 "summary_lines": summary_lines,
                 "edge_opportunities": edge_opportunities,
                 "top_rules": top_rule_rows,
@@ -741,7 +826,15 @@ async def human_dashboard():
     - Data freshness
     - System health
     """
+    global _human_dashboard_cache_payload, _human_dashboard_cache_updated_at
     now = _utcnow_naive()
+    if (
+        _human_dashboard_cache_payload is not None
+        and _human_dashboard_cache_updated_at is not None
+        and (now - _human_dashboard_cache_updated_at).total_seconds() < _HUMAN_DASHBOARD_CACHE_TTL_SECONDS
+    ):
+        return _human_dashboard_cache_payload
+
     hour_cutoff = now - timedelta(hours=1)
     day_cutoff = now - timedelta(hours=24)
 
@@ -1153,10 +1246,24 @@ async def human_dashboard():
 
             # --- TRADE SOURCE BREAKDOWN (ngram vs factor_match vs grok_direct vs combined) ---
             source_stats = {}
-            _empty_src = {"open": 0, "closed": 0, "wins": 0, "win_rate_pct": None, "pnl": 0.0, "unique_markets_open": 0, "unique_markets_closed": 0}
+            _empty_src = {
+                "open": 0,
+                "closed": 0,
+                "wins": 0,
+                "win_rate_pct": None,
+                "pnl": 0.0,
+                "pnl_per_bet": None,
+                "ev_per_bet": None,
+                "expected_open_pnl": None,
+                "avg_entry_open": None,
+                "avg_entry_closed": None,
+                "unique_markets_open": 0,
+                "unique_markets_closed": 0,
+                "book": "strategy",
+            }
             source_open_preds = real_trade_predicates(resolved=False)
             source_closed_preds = real_trade_predicates(resolved=True)
-            for src in ("ngram", "factor_match", "grok_direct", "combined", "ngram_inverse", "factor_match_inv", "grok_inv", "combined_inverse"):
+            for src in _ALL_TRACKED_TRADE_SOURCES:
                 src_closed = (await session.execute(
                     select(func.count(PaperTrade.id))
                     .join(Market, Market.id == PaperTrade.market_id)
@@ -1177,6 +1284,16 @@ async def human_dashboard():
                     .join(Market, Market.id == PaperTrade.market_id)
                     .where(PaperTrade.trade_source == src, *source_open_preds)
                 )).scalar() or 0
+                src_open_entry_sum = (await session.execute(
+                    select(func.sum(PaperTrade.entry_price))
+                    .join(Market, Market.id == PaperTrade.market_id)
+                    .where(PaperTrade.trade_source == src, *source_open_preds)
+                )).scalar() or 0.0
+                src_closed_entry_sum = (await session.execute(
+                    select(func.sum(PaperTrade.entry_price))
+                    .join(Market, Market.id == PaperTrade.market_id)
+                    .where(PaperTrade.trade_source == src, *source_closed_preds)
+                )).scalar() or 0.0
                 src_unique_open = (await session.execute(
                     select(func.count(func.distinct(PaperTrade.market_id)))
                     .join(Market, Market.id == PaperTrade.market_id)
@@ -1187,14 +1304,82 @@ async def human_dashboard():
                     .join(Market, Market.id == PaperTrade.market_id)
                     .where(PaperTrade.trade_source == src, *source_closed_preds)
                 )).scalar() or 0
-                src_wr = round(src_wins / src_closed * 100, 1) if src_closed else None
+                src_pnl_f = float(src_pnl or 0.0)
+                avg_entry_open = (float(src_open_entry_sum) / src_open) if src_open else None
+                avg_entry_closed = (float(src_closed_entry_sum) / src_closed) if src_closed else None
+                derived = _compute_source_derived_metrics(
+                    closed=int(src_closed),
+                    wins=int(src_wins),
+                    pnl=src_pnl_f,
+                    open_count=int(src_open),
+                    avg_entry_open=avg_entry_open,
+                    avg_entry_closed=avg_entry_closed,
+                )
                 source_stats[src] = {
                     "open": src_open, "closed": src_closed,
-                    "wins": src_wins, "win_rate_pct": src_wr,
-                    "pnl": round(float(src_pnl), 2),
+                    "wins": src_wins, "win_rate_pct": derived["win_rate_pct"],
+                    "pnl": round(src_pnl_f, 2),
+                    "pnl_per_bet": (
+                        round(float(derived["pnl_per_bet"]), 4)
+                        if derived["pnl_per_bet"] is not None else None
+                    ),
+                    "ev_per_bet": (
+                        round(float(derived["ev_per_bet"]), 4)
+                        if derived["ev_per_bet"] is not None else None
+                    ),
+                    "expected_open_pnl": (
+                        round(float(derived["expected_open_pnl"]), 2)
+                        if derived["expected_open_pnl"] is not None else None
+                    ),
+                    "avg_entry_open": round(float(avg_entry_open), 4) if avg_entry_open is not None else None,
+                    "avg_entry_closed": round(float(avg_entry_closed), 4) if avg_entry_closed is not None else None,
                     "unique_markets_open": src_unique_open,
                     "unique_markets_closed": src_unique_closed,
+                    "book": "strategy" if src in _DIRECT_TRADE_SOURCES else "control",
+                    "_open_entry_sum": float(src_open_entry_sum or 0.0),
+                    "_closed_entry_sum": float(src_closed_entry_sum or 0.0),
                 }
+
+            def _aggregate_book(label: str, keys: tuple[str, ...]) -> dict:
+                open_total = sum(int(source_stats.get(k, {}).get("open", 0) or 0) for k in keys)
+                closed_total = sum(int(source_stats.get(k, {}).get("closed", 0) or 0) for k in keys)
+                wins_total = sum(int(source_stats.get(k, {}).get("wins", 0) or 0) for k in keys)
+                pnl_total = sum(float(source_stats.get(k, {}).get("pnl", 0.0) or 0.0) for k in keys)
+                open_entry_sum = sum(float(source_stats.get(k, {}).get("_open_entry_sum", 0.0) or 0.0) for k in keys)
+                closed_entry_sum = sum(float(source_stats.get(k, {}).get("_closed_entry_sum", 0.0) or 0.0) for k in keys)
+                avg_open = (open_entry_sum / open_total) if open_total else None
+                avg_closed = (closed_entry_sum / closed_total) if closed_total else None
+                derived = _compute_source_derived_metrics(
+                    closed=closed_total,
+                    wins=wins_total,
+                    pnl=pnl_total,
+                    open_count=open_total,
+                    avg_entry_open=avg_open,
+                    avg_entry_closed=avg_closed,
+                )
+                return {
+                    "label": label,
+                    "open_count": open_total,
+                    "closed_count": closed_total,
+                    "wins": wins_total,
+                    "win_rate_pct": derived["win_rate_pct"],
+                    "total_pnl": round(pnl_total, 2),
+                    "pnl_per_bet": (
+                        round(float(derived["pnl_per_bet"]), 4)
+                        if derived["pnl_per_bet"] is not None else None
+                    ),
+                    "ev_per_bet": (
+                        round(float(derived["ev_per_bet"]), 4)
+                        if derived["ev_per_bet"] is not None else None
+                    ),
+                    "expected_open_pnl": (
+                        round(float(derived["expected_open_pnl"]), 2)
+                        if derived["expected_open_pnl"] is not None else None
+                    ),
+                }
+
+            strategy_book = _aggregate_book("Strategy (Direct)", _DIRECT_TRADE_SOURCES)
+            control_book = _aggregate_book("Control (Inverse)", _INVERSE_TRADE_SOURCES)
 
             # --- PER-CATEGORY PERFORMANCE BREAKDOWN ---
             cat_rows = (await session.execute(
@@ -1205,7 +1390,11 @@ async def human_dashboard():
                     func.sum(PaperTrade.pnl).label("pnl"),
                 )
                 .join(Market, Market.id == PaperTrade.market_id)
-                .where(PaperTrade.resolved == True, PaperTrade.entry_price > 0.02)  # noqa: E712
+                .where(
+                    PaperTrade.resolved == True,  # noqa: E712
+                    PaperTrade.entry_price > 0.02,
+                    PaperTrade.trade_source.in_(_DIRECT_TRADE_SOURCES),
+                )
                 .group_by("cat")
                 .order_by(func.sum(PaperTrade.pnl).desc())
             )).all()
@@ -1217,6 +1406,32 @@ async def human_dashboard():
                 pnl_f = float(pnl_c or 0.0)
                 wr = round(wins_i / closed_i * 100, 1) if closed_i else None
                 by_category[cat_str] = {
+                    "closed": closed_i,
+                    "wins": wins_i,
+                    "win_rate_pct": wr,
+                    "pnl": round(pnl_f, 2),
+                }
+
+            cat_rows_all = (await session.execute(
+                select(
+                    func.coalesce(Market.market_category, "other").label("cat"),
+                    func.count(PaperTrade.id).label("closed"),
+                    func.sum(case((PaperTrade.won == True, 1), else_=0)).label("wins"),
+                    func.sum(PaperTrade.pnl).label("pnl"),
+                )
+                .join(Market, Market.id == PaperTrade.market_id)
+                .where(PaperTrade.resolved == True, PaperTrade.entry_price > 0.02)  # noqa: E712
+                .group_by("cat")
+                .order_by(func.sum(PaperTrade.pnl).desc())
+            )).all()
+            by_category_all = {}
+            for cat, closed_c, wins_c, pnl_c in cat_rows_all:
+                cat_str = str(cat or "other")
+                closed_i = int(closed_c or 0)
+                wins_i = int(wins_c or 0)
+                pnl_f = float(pnl_c or 0.0)
+                wr = round(wins_i / closed_i * 100, 1) if closed_i else None
+                by_category_all[cat_str] = {
                     "closed": closed_i,
                     "wins": wins_i,
                     "win_rate_pct": wr,
@@ -1261,6 +1476,7 @@ async def human_dashboard():
             heartbeats = (await session.execute(
                 select(ServiceHeartbeat)
             )).scalars().all()
+            heartbeats = _select_relevant_heartbeats(heartbeats, now)
 
             expected_host = (os.environ.get("POLYEDGE_SCHEDULER_HOST", "") or "").strip()
             compute_hosts = set()
@@ -1336,7 +1552,14 @@ async def human_dashboard():
                 select(func.count(NgramStat.id))
             )).scalar() or 0
 
-            return {
+            def _public_source_stats(src_key: str, label: str) -> dict:
+                src = {**source_stats.get(src_key, _empty_src)}
+                for hidden_key in ("_open_entry_sum", "_closed_entry_sum"):
+                    src.pop(hidden_key, None)
+                src["label"] = label
+                return src
+
+            result = {
                 "generated_at": _iso_utc(now),
                 "action": action,
                 "hit_rate": {
@@ -1410,16 +1633,19 @@ async def human_dashboard():
                         },
                     },
                     "by_source": {
-                        "ngram": {**source_stats.get("ngram", _empty_src), "label": "Ngram Rules"},
-                        "factor_match": {**source_stats.get("factor_match", _empty_src), "label": "Factor Match"},
-                        "grok_direct": {**source_stats.get("grok_direct", _empty_src), "label": "Grok Predictions"},
-                        "combined": {**source_stats.get("combined", _empty_src), "label": "Ngram + Factor"},
-                        "ngram_inverse": {**source_stats.get("ngram_inverse", _empty_src), "label": "Ngram Inverse"},
-                        "factor_match_inv": {**source_stats.get("factor_match_inv", _empty_src), "label": "Factor Match Inverse"},
-                        "grok_inv": {**source_stats.get("grok_inv", _empty_src), "label": "Grok Inverse"},
-                        "combined_inverse": {**source_stats.get("combined_inverse", _empty_src), "label": "Combined Inverse"},
+                        "ngram": _public_source_stats("ngram", "Ngram Rules"),
+                        "factor_match": _public_source_stats("factor_match", "Factor Match"),
+                        "grok_direct": _public_source_stats("grok_direct", "Grok Predictions"),
+                        "combined": _public_source_stats("combined", "Ngram + Factor"),
+                        "ngram_inverse": _public_source_stats("ngram_inverse", "Ngram Inverse"),
+                        "factor_match_inv": _public_source_stats("factor_match_inv", "Factor Match Inverse"),
+                        "grok_inv": _public_source_stats("grok_inv", "Grok Inverse"),
+                        "combined_inverse": _public_source_stats("combined_inverse", "Combined Inverse"),
                     },
+                    "strategy_book": strategy_book,
+                    "control_book": control_book,
                     "by_category": by_category,
+                    "by_category_all": by_category_all,
                 },
                 "data_freshness": {
                     "status": freshness_status,
@@ -1450,9 +1676,330 @@ async def human_dashboard():
                     "features_today": features_today,
                 },
             }
+            _human_dashboard_cache_payload = result
+            _human_dashboard_cache_updated_at = _utcnow_naive()
+            return result
     except Exception as e:
         log.exception("human_dashboard failed")
+        if _human_dashboard_cache_payload is not None:
+            return _human_dashboard_cache_payload
         return {"error": str(e), "generated_at": _iso_utc(now)}
+
+
+def _profile_row_dict(profile: StrategyProfile) -> dict:
+    return {
+        "id": int(profile.id),
+        "name": profile.name,
+        "description": profile.description or "",
+        "active": bool(profile.active),
+        "include_inverse": bool(profile.include_inverse),
+        "created_at": _iso_utc(profile.created_at),
+        "updated_at": _iso_utc(profile.updated_at),
+    }
+
+
+async def _profile_side_stats(session, profile_id: int, side_source: str) -> dict:
+    preds = [PaperTrade.profile_id == profile_id, PaperTrade.trade_source == side_source, PaperTrade.entry_price > 0.02]
+    closed = (await session.execute(
+        select(func.count(PaperTrade.id)).where(*preds, PaperTrade.resolved == True)  # noqa: E712
+    )).scalar() or 0
+    wins = (await session.execute(
+        select(func.count(PaperTrade.id)).where(*preds, PaperTrade.resolved == True, PaperTrade.won == True)  # noqa: E712
+    )).scalar() or 0
+    pnl = (await session.execute(
+        select(func.sum(PaperTrade.pnl)).where(*preds, PaperTrade.resolved == True)  # noqa: E712
+    )).scalar() or 0.0
+    open_count = (await session.execute(
+        select(func.count(PaperTrade.id)).where(*preds, PaperTrade.resolved == False)  # noqa: E712
+    )).scalar() or 0
+    avg_entry_open = (await session.execute(
+        select(func.avg(PaperTrade.entry_price)).where(*preds, PaperTrade.resolved == False)  # noqa: E712
+    )).scalar()
+    avg_entry_closed = (await session.execute(
+        select(func.avg(PaperTrade.entry_price)).where(*preds, PaperTrade.resolved == True)  # noqa: E712
+    )).scalar()
+    derived = _compute_source_derived_metrics(
+        closed=int(closed),
+        wins=int(wins),
+        pnl=float(pnl or 0.0),
+        open_count=int(open_count),
+        avg_entry_open=float(avg_entry_open) if avg_entry_open is not None else None,
+        avg_entry_closed=float(avg_entry_closed) if avg_entry_closed is not None else None,
+    )
+    return {
+        "open_count": int(open_count),
+        "closed_count": int(closed),
+        "wins": int(wins),
+        "total_pnl": round(float(pnl or 0.0), 2),
+        "win_rate_pct": derived["win_rate_pct"],
+        "pnl_per_bet": round(float(derived["pnl_per_bet"]), 4) if derived["pnl_per_bet"] is not None else None,
+        "ev_per_bet": round(float(derived["ev_per_bet"]), 4) if derived["ev_per_bet"] is not None else None,
+        "expected_open_pnl": round(float(derived["expected_open_pnl"]), 2) if derived["expected_open_pnl"] is not None else None,
+    }
+
+
+@app.get("/api/profile/rule-leaderboard")
+async def profile_rule_leaderboard(
+    limit: int = Query(300, ge=1, le=2000),
+    min_samples: int = Query(200, ge=1, le=100000),
+):
+    """Top rules for profile construction."""
+    try:
+        async with SessionLocal() as session:
+            rows = (await session.execute(
+                select(TradingRule)
+                .where(
+                    TradingRule.active == True,  # noqa: E712
+                    TradingRule.rule_type == "ngram",
+                    TradingRule.sample_size >= min_samples,
+                )
+                .order_by(
+                    desc(TradingRule.avg_roi),
+                    desc(TradingRule.win_rate),
+                    desc(TradingRule.sample_size),
+                )
+                .limit(limit)
+            )).scalars().all()
+
+            realized_rows = (await session.execute(
+                select(
+                    PaperTrade.rule_id,
+                    func.count(PaperTrade.id),
+                    func.sum(case((PaperTrade.won == True, 1), else_=0)),
+                    func.sum(PaperTrade.pnl),
+                )
+                .where(
+                    PaperTrade.rule_id.is_not(None),
+                    PaperTrade.resolved == True,  # noqa: E712
+                    PaperTrade.entry_price > 0.02,
+                    PaperTrade.trade_source.in_((*_DIRECT_TRADE_SOURCES, "profile_direct")),
+                )
+                .group_by(PaperTrade.rule_id)
+            )).all()
+            realized_by_rule = {
+                int(rule_id): {
+                    "closed": int(closed or 0),
+                    "wins": int(wins or 0),
+                    "pnl": float(pnl or 0.0),
+                }
+                for rule_id, closed, wins, pnl in realized_rows
+                if rule_id is not None
+            }
+
+            out = []
+            for rule in rows:
+                realized = realized_by_rule.get(int(rule.id), {"closed": 0, "wins": 0, "pnl": 0.0})
+                closed = realized["closed"]
+                wins = realized["wins"]
+                pnl = realized["pnl"]
+                out.append({
+                    "id": int(rule.id),
+                    "name": rule.name,
+                    "rule_type": rule.rule_type,
+                    "predicted_side": rule.predicted_side,
+                    "tier": int(rule.tier or 3),
+                    "quality_label": rule.quality_label or "exploratory",
+                    "sample_size": int(rule.sample_size or 0),
+                    "win_rate_pct": round(float(rule.win_rate or 0) * 100, 1),
+                    "avg_roi": round(float(rule.avg_roi or 0), 4),
+                    "breakeven_price": round(float(rule.breakeven_price or 0), 4),
+                    "plain_english": _rule_to_plain_english(rule),
+                    "realized_closed": closed,
+                    "realized_wins": wins,
+                    "realized_win_rate_pct": round(wins / closed * 100, 1) if closed else None,
+                    "realized_pnl": round(pnl, 2),
+                    "realized_pnl_per_bet": round(pnl / closed, 4) if closed else None,
+                })
+            return {
+                "generated_at": _iso_utc(_utcnow_naive()),
+                "limit": limit,
+                "min_samples": min_samples,
+                "rows": out,
+            }
+    except Exception as e:
+        log.exception("profile_rule_leaderboard failed")
+        return {"error": str(e), "rows": []}
+
+
+@app.get("/api/profiles")
+async def list_profiles():
+    """List strategy profiles + current paper-trading scoreboard."""
+    try:
+        async with SessionLocal() as session:
+            profiles = (await session.execute(
+                select(StrategyProfile).order_by(StrategyProfile.created_at.asc(), StrategyProfile.id.asc())
+            )).scalars().all()
+            if not profiles:
+                return {"generated_at": _iso_utc(_utcnow_naive()), "profiles": []}
+
+            rule_counts = (await session.execute(
+                select(
+                    StrategyProfileRule.profile_id,
+                    func.count(StrategyProfileRule.id),
+                )
+                .where(StrategyProfileRule.enabled == True)  # noqa: E712
+                .group_by(StrategyProfileRule.profile_id)
+            )).all()
+            rule_count_map = {int(pid): int(cnt or 0) for pid, cnt in rule_counts}
+
+            out = []
+            for profile in profiles:
+                row = _profile_row_dict(profile)
+                row["selected_rules"] = rule_count_map.get(int(profile.id), 0)
+                row["direct"] = await _profile_side_stats(session, int(profile.id), "profile_direct")
+                row["inverse"] = await _profile_side_stats(session, int(profile.id), "profile_inverse")
+                out.append(row)
+
+            return {"generated_at": _iso_utc(_utcnow_naive()), "profiles": out}
+    except Exception as e:
+        log.exception("list_profiles failed")
+        return {"error": str(e), "profiles": []}
+
+
+@app.post("/api/profiles")
+async def create_profile(payload: dict = Body(...)):
+    """Create a new strategy profile."""
+    try:
+        name = str((payload or {}).get("name", "")).strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="name is required")
+        if len(name) > 80:
+            raise HTTPException(status_code=400, detail="name too long (max 80)")
+        description = str((payload or {}).get("description", "") or "").strip()
+        include_inverse = bool((payload or {}).get("include_inverse", True))
+
+        async with SessionLocal() as session:
+            existing = (await session.execute(
+                select(StrategyProfile).where(func.lower(StrategyProfile.name) == name.lower())
+            )).scalar_one_or_none()
+            if existing is not None:
+                raise HTTPException(status_code=409, detail="profile name already exists")
+            row = StrategyProfile(
+                name=name,
+                description=description,
+                include_inverse=include_inverse,
+                active=True,
+            )
+            session.add(row)
+            await session.commit()
+            await session.refresh(row)
+            return _profile_row_dict(row)
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("create_profile failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/api/profiles/{profile_id}/rules")
+async def set_profile_rules(profile_id: int, payload: dict = Body(...)):
+    """Replace profile rule set with the provided rule IDs."""
+    try:
+        rule_ids_raw = (payload or {}).get("rule_ids", [])
+        if not isinstance(rule_ids_raw, list):
+            raise HTTPException(status_code=400, detail="rule_ids must be a list")
+        rule_ids = sorted({int(rid) for rid in rule_ids_raw if str(rid).strip()})
+
+        async with SessionLocal() as session:
+            profile = await session.get(StrategyProfile, profile_id)
+            if profile is None:
+                raise HTTPException(status_code=404, detail="profile not found")
+
+            valid_rule_rows = (await session.execute(
+                select(TradingRule.id).where(
+                    TradingRule.id.in_(rule_ids),
+                    TradingRule.active == True,  # noqa: E712
+                    TradingRule.rule_type == "ngram",
+                )
+            )).all() if rule_ids else []
+            valid_rule_ids = sorted({int(rid) for (rid,) in valid_rule_rows})
+
+            await session.execute(
+                delete(StrategyProfileRule).where(StrategyProfileRule.profile_id == profile_id)
+            )
+            for rid in valid_rule_ids:
+                session.add(StrategyProfileRule(
+                    profile_id=profile_id,
+                    rule_id=rid,
+                    enabled=True,
+                ))
+            profile.updated_at = _utcnow_naive()
+            await session.commit()
+            return {
+                "profile_id": profile_id,
+                "requested_rule_ids": rule_ids,
+                "stored_rule_ids": valid_rule_ids,
+                "stored_count": len(valid_rule_ids),
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("set_profile_rules failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/profiles/{profile_id}/performance")
+async def profile_performance(profile_id: int):
+    """Detailed performance view for one profile."""
+    try:
+        async with SessionLocal() as session:
+            profile = await session.get(StrategyProfile, profile_id)
+            if profile is None:
+                raise HTTPException(status_code=404, detail="profile not found")
+
+            direct = await _profile_side_stats(session, profile_id, "profile_direct")
+            inverse = await _profile_side_stats(session, profile_id, "profile_inverse")
+            by_category_rows = (await session.execute(
+                select(
+                    func.coalesce(Market.market_category, "other").label("cat"),
+                    func.count(PaperTrade.id).label("closed"),
+                    func.sum(case((PaperTrade.won == True, 1), else_=0)).label("wins"),
+                    func.sum(PaperTrade.pnl).label("pnl"),
+                )
+                .join(Market, Market.id == PaperTrade.market_id)
+                .where(
+                    PaperTrade.profile_id == profile_id,
+                    PaperTrade.trade_source == "profile_direct",
+                    PaperTrade.resolved == True,  # noqa: E712
+                    PaperTrade.entry_price > 0.02,
+                )
+                .group_by("cat")
+                .order_by(func.sum(PaperTrade.pnl).desc())
+            )).all()
+            by_category = {}
+            for cat, closed_c, wins_c, pnl_c in by_category_rows:
+                closed_i = int(closed_c or 0)
+                wins_i = int(wins_c or 0)
+                by_category[str(cat or "other")] = {
+                    "closed": closed_i,
+                    "wins": wins_i,
+                    "win_rate_pct": round(wins_i / closed_i * 100, 1) if closed_i else None,
+                    "pnl": round(float(pnl_c or 0.0), 2),
+                }
+
+            selected_rule_rows = (await session.execute(
+                select(TradingRule.id, TradingRule.name)
+                .join(StrategyProfileRule, StrategyProfileRule.rule_id == TradingRule.id)
+                .where(
+                    StrategyProfileRule.profile_id == profile_id,
+                    StrategyProfileRule.enabled == True,  # noqa: E712
+                )
+                .order_by(TradingRule.win_rate.desc(), TradingRule.sample_size.desc())
+            )).all()
+
+            return {
+                "generated_at": _iso_utc(_utcnow_naive()),
+                "profile": _profile_row_dict(profile),
+                "selected_rules": [{"id": int(rid), "name": name} for rid, name in selected_rule_rows],
+                "direct": direct,
+                "inverse": inverse,
+                "by_category": by_category,
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("profile_performance failed")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/markets")
@@ -1980,6 +2527,7 @@ async def ops_runtime_status():
             heartbeat_rows = (
                 await session.execute(select(ServiceHeartbeat).order_by(ServiceHeartbeat.service))
             ).scalars().all()
+            heartbeat_rows = _select_relevant_heartbeats(heartbeat_rows, now)
 
             services = []
             heavy_compute_services = {

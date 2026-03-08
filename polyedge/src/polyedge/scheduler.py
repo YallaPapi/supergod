@@ -500,7 +500,9 @@ async def run_factor_match_paper_trading():
 
         trades_opened = 0
         inverse_opened = 0
-        for pred, market in pred_rows:
+        for i, (pred, market) in enumerate(pred_rows):
+            if i > 0 and i % 200 == 0:
+                await asyncio.sleep(0)
             side = (pred.predicted_outcome or "").upper()
             if side not in ("YES", "NO"):
                 continue
@@ -576,101 +578,135 @@ async def run_grok_prediction_trading():
     from polyedge.research.grok_predictor import generate_grok_predictions
     from sqlalchemy import select
 
-    # Step 1: Generate new predictions (calls Grok API)
-    new_preds = await generate_grok_predictions()
+    async def _place_from_recent_predictions(*, cutoff_days: int = 7) -> tuple[int, int, int]:
+        """Place trades for already-stored predictions quickly.
 
-    # Step 2: Find all grok predictions that don't have trades yet
-    async with SessionLocal() as session:
-        now = _utcnow_naive()
-        cutoff = now - timedelta(days=7)
+        Critical for reliability: trading should continue even if prediction generation
+        is slow or timing out under scheduler load.
+        """
+        async with SessionLocal() as session:
+            now = _utcnow_naive()
+            cutoff = now - timedelta(days=cutoff_days)
 
-        preds = (await session.execute(
-            select(GrokPrediction, Market)
-            .join(Market, Market.id == GrokPrediction.market_id)
-            .where(
-                GrokPrediction.created_at >= cutoff,
-                Market.active == True,  # noqa: E712
-                Market.end_date.is_not(None),
-                Market.end_date > now,
+            preds = (await session.execute(
+                select(GrokPrediction, Market)
+                .join(Market, Market.id == GrokPrediction.market_id)
+                .where(
+                    GrokPrediction.created_at >= cutoff,
+                    Market.active == True,  # noqa: E712
+                    Market.end_date.is_not(None),
+                    Market.end_date > now,
+                )
+            )).all()
+
+            if not preds:
+                return (0, 0, 0)
+
+            open_direct = set(
+                (r[0], r[1]) for r in (await session.execute(
+                    select(PaperTrade.market_id, PaperTrade.side)
+                    .where(
+                        PaperTrade.resolved == False,  # noqa: E712
+                        PaperTrade.trade_source == "grok_direct",
+                    )
+                )).all()
             )
-        )).all()
+            open_inverse = set(
+                (r[0], r[1]) for r in (await session.execute(
+                    select(PaperTrade.market_id, PaperTrade.side)
+                    .where(
+                        PaperTrade.resolved == False,  # noqa: E712
+                        PaperTrade.trade_source == "grok_inv",
+                    )
+                )).all()
+            )
 
-        if not preds:
-            log.info("Grok trading: 0 predictions to trade")
-            return
+            direct_opened = 0
+            inverse_opened = 0
 
-        # Pre-load existing open trades to avoid duplicates
-        open_direct = set(
-            (r[0], r[1]) for r in (await session.execute(
-                select(PaperTrade.market_id, PaperTrade.side)
-                .where(
-                    PaperTrade.resolved == False,  # noqa: E712
-                    PaperTrade.trade_source == "grok_direct",
-                )
-            )).all()
+            for i, (pred, market) in enumerate(preds):
+                if i > 0 and i % 200 == 0:
+                    await asyncio.sleep(0)
+                side = pred.predicted_side.upper()
+                if side not in ("YES", "NO"):
+                    continue
+
+                yes_price = float(market.yes_price or 0.5)
+                no_price = float(market.no_price) if market.no_price is not None else max(0.001, 1.0 - yes_price)
+
+                entry = yes_price if side == "YES" else no_price
+                inv_side = "NO" if side == "YES" else "YES"
+                inv_entry = no_price if side == "YES" else yes_price
+
+                if (market.id, side) not in open_direct:
+                    session.add(PaperTrade(
+                        market_id=market.id,
+                        rule_id=None,
+                        side=side,
+                        entry_price=entry,
+                        edge=1.0 - entry - entry,
+                        bet_size=1.0,
+                        trade_source="grok_direct",
+                        resolved=False,
+                    ))
+                    open_direct.add((market.id, side))
+                    direct_opened += 1
+
+                if (market.id, inv_side) not in open_inverse:
+                    session.add(PaperTrade(
+                        market_id=market.id,
+                        rule_id=None,
+                        side=inv_side,
+                        entry_price=inv_entry,
+                        edge=1.0 - inv_entry - inv_entry,
+                        bet_size=1.0,
+                        trade_source="grok_inv",
+                        resolved=False,
+                    ))
+                    open_inverse.add((market.id, inv_side))
+                    inverse_opened += 1
+
+            await _safe_commit(session, loop_name="grok_prediction_trading")
+            return (len(preds), direct_opened, inverse_opened)
+
+    # Step 1: always place trades from existing predictions first.
+    # This keeps Grok trading moving even if generation is slow.
+    pred_count_before, direct_before, inverse_before = await _place_from_recent_predictions()
+
+    # Step 2: attempt to generate new predictions, but time-bound this phase.
+    generation_timeout = max(
+        60,
+        int(getattr(db_settings, "grok_generation_timeout_seconds", 900) or 900),
+    )
+    new_preds = 0
+    try:
+        new_preds = await asyncio.wait_for(
+            generate_grok_predictions(
+                max_concurrent=max(1, int(getattr(db_settings, "grok_prediction_max_concurrent", 4) or 4)),
+                execution_mode=getattr(db_settings, "grok_execution_mode", "sequential"),
+            ),
+            timeout=generation_timeout,
         )
-        open_inverse = set(
-            (r[0], r[1]) for r in (await session.execute(
-                select(PaperTrade.market_id, PaperTrade.side)
-                .where(
-                    PaperTrade.resolved == False,  # noqa: E712
-                    PaperTrade.trade_source == "grok_inv",
-                )
-            )).all()
+    except asyncio.TimeoutError:
+        log.warning(
+            "Grok generation phase timed out after %ss; continuing with trade placement from existing predictions",
+            generation_timeout,
         )
+    except Exception:
+        log.exception("Grok generation phase failed; continuing with existing predictions")
 
-        direct_opened = 0
-        inverse_opened = 0
-
-        for pred, market in preds:
-            side = pred.predicted_side.upper()
-            if side not in ("YES", "NO"):
-                continue
-
-            yes_price = float(market.yes_price or 0.5)
-            no_price = float(market.no_price) if market.no_price is not None else max(0.001, 1.0 - yes_price)
-
-            # No price filter — user wants all data, both sides always
-
-            entry = yes_price if side == "YES" else no_price
-            inv_side = "NO" if side == "YES" else "YES"
-            inv_entry = no_price if side == "YES" else yes_price
-
-            # Direct trade — bet what Grok says
-            if (market.id, side) not in open_direct:
-                session.add(PaperTrade(
-                    market_id=market.id,
-                    rule_id=None,
-                    side=side,
-                    entry_price=entry,
-                    edge=1.0 - entry - entry,
-                    bet_size=1.0,
-                    trade_source="grok_direct",
-                    resolved=False,
-                ))
-                open_direct.add((market.id, side))
-                direct_opened += 1
-
-            # Inverse trade — bet the opposite of Grok
-            if (market.id, inv_side) not in open_inverse:
-                session.add(PaperTrade(
-                    market_id=market.id,
-                    rule_id=None,
-                    side=inv_side,
-                    entry_price=inv_entry,
-                    edge=1.0 - inv_entry - inv_entry,
-                    bet_size=1.0,
-                    trade_source="grok_inv",
-                    resolved=False,
-                ))
-                open_inverse.add((market.id, inv_side))
-                inverse_opened += 1
-
-        await _safe_commit(session, loop_name="grok_prediction_trading")
+    # Step 3: place again to include any newly generated predictions this cycle.
+    pred_count_after, direct_after, inverse_after = await _place_from_recent_predictions()
 
     log.info(
-        "Grok trading: %d new preds, %d direct + %d inverse trades opened",
-        new_preds, direct_opened, inverse_opened,
+        "Grok trading: existing_preds_before=%d opened=%d/%d, new_preds=%d, existing_preds_after=%d opened=%d/%d",
+        pred_count_before,
+        direct_before,
+        inverse_before,
+        new_preds,
+        pred_count_after,
+        direct_after,
+        inverse_after,
     )
 
 
@@ -871,6 +907,206 @@ async def run_combined_paper_trading():
     log.info("Combined paper trading: %d new trades", trades_opened)
 
 
+async def run_profile_paper_trading():
+    """Run active profile books in parallel with baseline books."""
+    from polyedge.models import (
+        Market,
+        PaperTrade,
+        StrategyProfile,
+        StrategyProfileRule,
+        TradingRule,
+    )
+    from sqlalchemy import select
+
+    MIN_EDGE_TIER1 = 0.05
+    MIN_EDGE_TIER2 = 0.08
+    now = _utcnow_naive()
+    max_end = now + timedelta(hours=48)
+
+    async with SessionLocal() as session:
+        profiles = (await session.execute(
+            select(StrategyProfile).where(StrategyProfile.active == True)  # noqa: E712
+        )).scalars().all()
+        if not profiles:
+            log.info("Profile paper trading: no active profiles")
+            return
+
+        markets = (await session.execute(
+            select(Market).where(
+                Market.active == True,  # noqa: E712
+                Market.end_date.is_not(None),
+                Market.end_date > now,
+                Market.end_date <= max_end,
+            )
+        )).scalars().all()
+        if not markets:
+            log.info("Profile paper trading: no markets ending within 48h")
+            return
+
+        total_direct_opened = 0
+        total_inverse_opened = 0
+        active_profile_count = 0
+        batch_pending = 0
+
+        for profile in profiles:
+            rows = (await session.execute(
+                select(TradingRule, StrategyProfileRule)
+                .join(StrategyProfileRule, StrategyProfileRule.rule_id == TradingRule.id)
+                .where(
+                    StrategyProfileRule.profile_id == profile.id,
+                    StrategyProfileRule.enabled == True,  # noqa: E712
+                    TradingRule.active == True,  # noqa: E712
+                    TradingRule.rule_type == "ngram",
+                )
+                .order_by(TradingRule.win_rate.desc())
+            )).all()
+            if not rows:
+                continue
+
+            parsed_rules: list[dict] = []
+            for rule, profile_rule in rows:
+                try:
+                    cond = json.loads(rule.conditions_json) if isinstance(rule.conditions_json, str) else (rule.conditions_json or {})
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                phrase = str(cond.get("ngram", "")).strip().lower()
+                if not phrase:
+                    continue
+                side = (rule.predicted_side or "").upper().strip()
+                if side not in ("YES", "NO"):
+                    continue
+                side_mode = (profile_rule.side_mode or "rule").strip().lower()
+                if side_mode == "inverse":
+                    side = "NO" if side == "YES" else "YES"
+                tier = int(rule.tier or 3)
+                parsed_rules.append({
+                    "id": rule.id,
+                    "phrase": phrase,
+                    "side": side,
+                    "breakeven": rule.breakeven_price or rule.win_rate,
+                    "min_edge": MIN_EDGE_TIER1 if tier == 1 else MIN_EDGE_TIER2,
+                    "market_filter": (rule.market_filter or "").strip(),
+                })
+
+            if not parsed_rules:
+                continue
+            active_profile_count += 1
+
+            open_direct_rows = (await session.execute(
+                select(PaperTrade.market_id, PaperTrade.side)
+                .where(
+                    PaperTrade.profile_id == profile.id,
+                    PaperTrade.resolved == False,  # noqa: E712
+                    PaperTrade.trade_source == "profile_direct",
+                )
+            )).all()
+            existing_direct: set[tuple[str, str]] = {(r[0], r[1]) for r in open_direct_rows}
+
+            open_inverse_rows = (await session.execute(
+                select(PaperTrade.market_id, PaperTrade.side)
+                .where(
+                    PaperTrade.profile_id == profile.id,
+                    PaperTrade.resolved == False,  # noqa: E712
+                    PaperTrade.trade_source == "profile_inverse",
+                )
+            )).all()
+            existing_inverse: set[tuple[str, str]] = {(r[0], r[1]) for r in open_inverse_rows}
+
+            direct_opened = 0
+            inverse_opened = 0
+            for i, market in enumerate(markets):
+                if i > 0 and i % 200 == 0:
+                    await asyncio.sleep(0)
+                q_lower = (market.question or "").lower()
+                yes_price = float(market.yes_price or 0.5)
+                no_price = float(market.no_price) if market.no_price is not None else max(0.001, 1.0 - yes_price)
+                if yes_price <= 0.02 or yes_price >= 0.98:
+                    continue
+
+                best_by_side: dict[str, dict] = {}
+                for rule in parsed_rules:
+                    if rule["phrase"] not in q_lower:
+                        continue
+                    mf = rule["market_filter"]
+                    if mf and mf != (getattr(market, "market_category", "") or ""):
+                        continue
+                    side = rule["side"]
+                    entry = yes_price if side == "YES" else no_price
+                    edge = rule["breakeven"] - entry
+                    if edge < rule["min_edge"]:
+                        continue
+                    existing = best_by_side.get(side)
+                    if existing is None or edge > existing["edge"]:
+                        best_by_side[side] = {
+                            "rule_id": rule["id"],
+                            "side": side,
+                            "entry": entry,
+                            "edge": edge,
+                        }
+
+                for match in best_by_side.values():
+                    key = (market.id, match["side"])
+                    if key not in existing_direct:
+                        session.add(PaperTrade(
+                            market_id=market.id,
+                            rule_id=match["rule_id"],
+                            profile_id=profile.id,
+                            side=match["side"],
+                            entry_price=match["entry"],
+                            edge=match["edge"],
+                            bet_size=1.0,
+                            trade_source="profile_direct",
+                            resolved=False,
+                        ))
+                        existing_direct.add(key)
+                        direct_opened += 1
+                        batch_pending += 1
+
+                    if profile.include_inverse:
+                        inv_side = "NO" if match["side"] == "YES" else "YES"
+                        inv_entry = no_price if match["side"] == "YES" else yes_price
+                        inv_key = (market.id, inv_side)
+                        if inv_key not in existing_inverse:
+                            session.add(PaperTrade(
+                                market_id=market.id,
+                                rule_id=match["rule_id"],
+                                profile_id=profile.id,
+                                side=inv_side,
+                                entry_price=inv_entry,
+                                edge=0.0,
+                                bet_size=1.0,
+                                trade_source="profile_inverse",
+                                resolved=False,
+                            ))
+                            existing_inverse.add(inv_key)
+                            inverse_opened += 1
+                            batch_pending += 1
+
+                if batch_pending >= 200:
+                    await _safe_commit(session, loop_name="profile_paper_trading")
+                    batch_pending = 0
+
+            total_direct_opened += direct_opened
+            total_inverse_opened += inverse_opened
+            log.info(
+                "Profile %s (%s): %d direct + %d inverse trades opened",
+                profile.id,
+                profile.name,
+                direct_opened,
+                inverse_opened,
+            )
+
+        if batch_pending > 0:
+            await _safe_commit(session, loop_name="profile_paper_trading")
+
+    log.info(
+        "Profile paper trading: %d profiles active, %d direct + %d inverse trades opened",
+        active_profile_count,
+        total_direct_opened,
+        total_inverse_opened,
+    )
+
+
 async def check_resolutions():
     """Fast-path: only fetch markets we have open trades on that should have resolved.
 
@@ -882,6 +1118,9 @@ async def check_resolutions():
     from sqlalchemy import select
 
     now = _utcnow_naive()
+
+    # Keep each cycle bounded; process the oldest pending slice every minute.
+    batch_size = max(1, int(getattr(db_settings, "resolution_check_batch_size", 100) or 100))
 
     # Find markets with open paper trades whose end_date has passed.
     # Prioritize the most recently ended markets so today's trades get resolved first,
@@ -898,7 +1137,7 @@ async def check_resolutions():
             )
             .distinct()
             .order_by(Market.end_date.desc())
-            .limit(500)
+            .limit(batch_size)
         )).all()
         pending_ids = [row[0] for row in pending_rows]
 
@@ -912,7 +1151,9 @@ async def check_resolutions():
     resolved_count = 0
     try:
         async with SessionLocal() as session:
-            for market_id in pending_ids:
+            for i, market_id in enumerate(pending_ids):
+                if i > 0 and i % 25 == 0:
+                    await asyncio.sleep(0)
                 try:
                     raw = await poller.fetch_market_by_id(market_id)
                     if raw is None:
@@ -981,8 +1222,17 @@ async def run_forever():
         return
     log.info("PolyEdge v3 scheduler starting")
 
-    async def loop(fn, interval_seconds: int, name: str, max_duration: int = 600):
+    async def loop(
+        fn,
+        interval_seconds: int,
+        name: str,
+        max_duration: int = 600,
+        initial_delay_seconds: int = 0,
+    ):
         """Run fn() every interval_seconds. Cancel if takes > max_duration seconds."""
+        if initial_delay_seconds > 0:
+            await _record_heartbeat(name, "idle", details=f"initial_delay_{initial_delay_seconds}s")
+            await asyncio.sleep(initial_delay_seconds)
         while True:
             try:
                 log.info("Running %s...", name)
@@ -1004,48 +1254,35 @@ async def run_forever():
                 if remaining > 0:
                     await _record_heartbeat(name, "idle", details=f"next_run_in_{remaining}s")
 
-    await asyncio.gather(
-        # Core polling + scoring (every 5 min)
-        loop(poll_then_score, 300, "poller+scorer", max_duration=300),
+    loop_specs = [
+        (poll_then_score, 300, "poller+scorer", 300),
+        (generate_all_predictions, 3600, "predictions", 600),
+        (run_api_research, 1800, "api_research", 600),
+        (run_supergod_research, 1800, "supergod_dispatch", 300),
+        (ingest_supergod_research, 600, "supergod_ingest", 300),
+        (collect_daily_features, 21600, "feature_collection", 600),
+        (run_paper_trading, 300, "paper_trading", 300),
+        (run_factor_match_paper_trading, 300, "factor_match_trading", 300),
+        (run_grok_prediction_trading, 3600, "grok_prediction_trading", 1800),
+        (run_combined_paper_trading, 300, "combined_paper_trading", 300),
+        (run_profile_paper_trading, 300, "profile_paper_trading", 300),
+        (score_paper_trades, 300, "score_paper_trades", 300),
+        (check_resolutions, 60, "resolution_check", 300),
+        (run_correlation_refresh, 86400, "correlation_refresh", 3600),
+        (run_research_rule_bridge, 21600, "research_rule_bridge", 1800),
+        (run_backtest_refresh, 604800, "backtest_refresh", 3600),
+        (run_agreement_refresh, 86400, "agreement_refresh", 1800),
+    ]
+    base_stagger = max(0, int(getattr(db_settings, "scheduler_startup_stagger_seconds", 0) or 0))
+    max_stagger = 300
+    await asyncio.gather(*[
+        loop(
+            fn,
+            interval_seconds,
+            name,
+            max_duration=max_duration,
+            initial_delay_seconds=min(i * base_stagger, max_stagger),
+        )
+        for i, (fn, interval_seconds, name, max_duration) in enumerate(loop_specs)
+    ])
 
-        # Prediction generation (every 1 hour, independent to prevent duplicates)
-        loop(generate_all_predictions, 3600, "predictions", max_duration=600),
-
-        # LLM API research and codex-worker distillation pipeline
-        loop(run_api_research, 1800, "api_research", max_duration=600),
-        loop(run_supergod_research, 1800, "supergod_dispatch", max_duration=300),
-        loop(ingest_supergod_research, 600, "supergod_ingest", max_duration=300),
-
-        # Feature collection (every 6 hours)
-        loop(collect_daily_features, 21600, "feature_collection", max_duration=600),
-
-        # Paper trading: ngram rules (every 5 min, 48h horizon)
-        loop(run_paper_trading, 300, "paper_trading", max_duration=300),
-
-        # Paper trading: factor-match predictions (every 5 min, 48h horizon)
-        loop(run_factor_match_paper_trading, 300, "factor_match_trading", max_duration=300),
-
-        # Paper trading: Grok direct predictions (every 1 hour — calls Grok API)
-        loop(run_grok_prediction_trading, 3600, "grok_prediction_trading", max_duration=1800),
-
-        # Paper trading: combined ngram+LLM (every 5 min, 48h horizon)
-        loop(run_combined_paper_trading, 300, "combined_paper_trading", max_duration=300),
-
-        # Score paper trades (every 5 min)
-        loop(score_paper_trades, 300, "score_paper_trades", max_duration=300),
-
-        # Fast resolution checker — only polls markets with open trades past end_date (every 60s)
-        loop(check_resolutions, 60, "resolution_check", max_duration=120),
-
-        # Correlation refresh (every 24 hours)
-        loop(run_correlation_refresh, 86400, "correlation_refresh", max_duration=3600),
-
-        # Research-to-rules bridge (every 6 hours — 21600 seconds)
-        loop(run_research_rule_bridge, 21600, "research_rule_bridge", max_duration=1800),
-
-        # Backtest refresh (weekly — 604800 seconds)
-        loop(run_backtest_refresh, 604800, "backtest_refresh", max_duration=3600),
-
-        # Agreement analysis (daily — 86400 seconds)
-        loop(run_agreement_refresh, 86400, "agreement_refresh", max_duration=1800),
-    )

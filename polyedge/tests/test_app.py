@@ -7,6 +7,7 @@ import pytest
 import polyedge.app as app_module
 from polyedge.app import (
     app,
+    _compute_source_derived_metrics,
     _iso_utc,
     _prediction_edge_pct,
     _rule_to_plain_english,
@@ -25,6 +26,32 @@ def test_dashboard_endpoint_registered():
 
 def test_dashboard_summary_endpoint():
     assert app.url_path_for("dashboard_summary") == "/api/dashboard"
+
+
+@pytest.mark.asyncio
+async def test_dashboard_summary_returns_payload_not_null(monkeypatch):
+    class _Result:
+        def scalar(self):
+            return 0
+
+        def all(self):
+            return []
+
+    class _Session:
+        async def execute(self, *_args, **_kwargs):
+            return _Result()
+
+    class _SessionCtx:
+        async def __aenter__(self):
+            return _Session()
+
+        async def __aexit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(app_module, "SessionLocal", lambda: _SessionCtx())
+    result = await app_module.dashboard_summary()
+    assert isinstance(result, dict)
+    assert "total_markets" in result
 
 
 def test_pnl_endpoint():
@@ -57,6 +84,26 @@ def test_mission_control_endpoint():
 
 def test_ops_runtime_endpoint():
     assert app.url_path_for("ops_runtime_status") == "/api/ops/runtime"
+
+
+def test_profile_rule_leaderboard_endpoint_registered():
+    assert app.url_path_for("profile_rule_leaderboard") == "/api/profile/rule-leaderboard"
+
+
+def test_profiles_list_endpoint_registered():
+    assert app.url_path_for("list_profiles") == "/api/profiles"
+
+
+def test_profiles_create_endpoint_registered():
+    assert app.url_path_for("create_profile") == "/api/profiles"
+
+
+def test_profile_rules_update_endpoint_registered():
+    assert app.url_path_for("set_profile_rules", profile_id=1) == "/api/profiles/1/rules"
+
+
+def test_profile_performance_endpoint_registered():
+    assert app.url_path_for("profile_performance", profile_id=1) == "/api/profiles/1/performance"
 
 
 def test_markets_endpoint_registered():
@@ -94,6 +141,20 @@ def test_backtest_endpoint_reads_env_path(tmp_path, monkeypatch):
     assert resp.json()["trades"] == 7
 
 
+def test_api_responses_disable_cache():
+    client = TestClient(app)
+    resp = client.get("/api/backtest")
+    assert resp.status_code == 200
+    assert "no-store" in resp.headers.get("cache-control", "")
+
+
+def test_dashboard_html_response_disables_cache():
+    client = TestClient(app)
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert "no-store" in resp.headers.get("cache-control", "")
+
+
 def test_prediction_edge_pct_yes():
     assert _prediction_edge_pct("YES", 0.70, 0.55) == 15.0
 
@@ -111,6 +172,36 @@ def test_prediction_edge_pct_invalid_input():
 
 def test_iso_utc_formats_with_z_suffix():
     assert _iso_utc(app_module.datetime(2026, 3, 6, 12, 0, 0)).endswith("Z")
+
+
+def test_compute_source_derived_metrics_with_open_book():
+    out = _compute_source_derived_metrics(
+        closed=10,
+        wins=6,
+        pnl=1.5,
+        open_count=4,
+        avg_entry_open=0.52,
+        avg_entry_closed=0.49,
+    )
+    assert out["win_rate_pct"] == 60.0
+    assert out["pnl_per_bet"] == pytest.approx(0.15, abs=1e-9)
+    assert out["ev_per_bet"] == pytest.approx(0.08, abs=1e-9)
+    assert out["expected_open_pnl"] == pytest.approx(0.32, abs=1e-9)
+
+
+def test_compute_source_derived_metrics_without_closed_trades():
+    out = _compute_source_derived_metrics(
+        closed=0,
+        wins=0,
+        pnl=0.0,
+        open_count=7,
+        avg_entry_open=0.48,
+        avg_entry_closed=None,
+    )
+    assert out["win_rate_pct"] is None
+    assert out["pnl_per_bet"] is None
+    assert out["ev_per_bet"] is None
+    assert out["expected_open_pnl"] is None
 
 
 def test_human_dashboard_endpoint_registered():
